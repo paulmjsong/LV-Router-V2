@@ -64,7 +64,7 @@ def local_deployment(alias: str) -> dict[str, Any]:
         if alias == "local-router":
             model_id = env("OLLAMA_ROUTER_MODEL_ID", "qwen3:0.6b")
         else:
-            model_id = env("OLLAMA_MODEL_ID", "qwen3:4b")
+            model_id = env("OLLAMA_MODEL_ID", "qwen3:4b-instruct-2507-q4_K_M")
         return deployment(
             alias=alias,
             model=f"ollama_chat/{model_id}",

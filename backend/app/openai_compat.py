@@ -288,16 +288,23 @@ def _stream_request(
                 await queue.put(("error", exc))
 
         task = asyncio.create_task(runner())
+        # Send visible content immediately; a role-only chunk is often rendered
+        # as an empty loading indicator by OpenAI-compatible chat clients.
         yield _chunk_payload(
             completion_id=completion_id,
             model=payload.model,
             created=created,
             role="assistant",
+            content="> **Status:** routing request…\n\n",
         )
 
         try:
             while True:
-                kind, value = await queue.get()
+                try:
+                    kind, value = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except TimeoutError:
+                    yield ": keep-alive\n\n"
+                    continue
                 if kind == "route":
                     yield _chunk_payload(
                         completion_id=completion_id,
@@ -377,7 +384,11 @@ def _stream_request(
     return StreamingResponse(
         events(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
     )
 
 

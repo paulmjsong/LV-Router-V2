@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -12,6 +13,8 @@ if TYPE_CHECKING:
 
 from .auth import UserContext
 from .config import Settings
+
+logger = logging.getLogger("saegyeol.llm")
 
 
 @dataclass(slots=True)
@@ -96,6 +99,13 @@ class LLMGateway:
             self._clients[api_key] = client
         return client
 
+    def _effective_max_tokens(self, model_alias: str, requested: int) -> int:
+        if model_alias == self.settings.local_router_model_alias:
+            return min(requested, self.settings.local_router_max_tokens)
+        if model_alias == "local-fast":
+            return min(requested, self.settings.local_fast_max_tokens)
+        return requested
+
     @asynccontextmanager
     async def stream_run(
         self,
@@ -130,6 +140,18 @@ class LLMGateway:
         response_format: dict[str, Any] | None,
         stream: bool,
     ) -> dict[str, Any]:
+        extra_body: dict[str, Any] = {
+            "metadata": {
+                "run_id": run_id,
+                "workflow_id": workflow_id,
+                "stage": stage,
+                "team_id": user.team_id or "",
+            }
+        }
+        # Ollama may expose a separate reasoning stream for thinking models.
+        # Disable it for the local control and local answer aliases.
+        if model_alias in {"local-router", "local-fast"}:
+            extra_body["think"] = False
         kwargs: dict[str, Any] = {
             "model": model_alias,
             "messages": list(messages),
@@ -137,14 +159,7 @@ class LLMGateway:
             "max_tokens": max_tokens,
             "user": user.user_id,
             "stream": stream,
-            "extra_body": {
-                "metadata": {
-                    "run_id": run_id,
-                    "workflow_id": workflow_id,
-                    "stage": stage,
-                    "team_id": user.team_id or "",
-                }
-            },
+            "extra_body": extra_body,
         }
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
@@ -185,6 +200,7 @@ class LLMGateway:
         served_model = model_alias
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
+        reasoning_notice_sent = False
 
         async for chunk in stream:
             served_model = str(getattr(chunk, "model", served_model) or served_model)
@@ -200,8 +216,23 @@ class LLMGateway:
             delta = getattr(choice, "delta", None)
             content = getattr(delta, "content", None) if delta is not None else None
             text = content if isinstance(content, str) else ""
+            reasoning = None
+            if delta is not None:
+                reasoning = (
+                    getattr(delta, "reasoning_content", None)
+                    or getattr(delta, "thinking", None)
+                )
             if text:
                 parts.append(text)
+            elif isinstance(reasoning, str) and reasoning and not reasoning_notice_sent:
+                reasoning_notice_sent = True
+                await sink(
+                    LLMStreamChunk(
+                        content="> **Model status:** hidden reasoning suppressed.\n\n",
+                        requested_alias=model_alias,
+                        served_model=served_model,
+                    )
+                )
             await sink(
                 LLMStreamChunk(
                     content=text,
@@ -232,6 +263,15 @@ class LLMGateway:
         max_tokens: int = 1800,
         response_format: dict[str, Any] | None = None,
     ) -> LLMResult:
+        max_tokens = self._effective_max_tokens(model_alias, max_tokens)
+        logger.info(
+            "LLM call alias=%s workflow=%s stage=%s stream=%s max_tokens=%d",
+            model_alias,
+            workflow_id,
+            stage,
+            self._stream_registrations.get(run_id) is not None,
+            max_tokens,
+        )
         registration = self._stream_registrations.get(run_id)
         if registration is not None and stage in registration.stages:
             return await self._chat_streamed(

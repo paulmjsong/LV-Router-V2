@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     local_router_model_alias: str = "local-router"
     local_router_max_tokens: int = Field(default=64, ge=32, le=256)
     local_router_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Hard ceiling for local answer generation on CPU/dev deployments.
+    local_fast_max_tokens: int = Field(default=512, ge=64, le=4096)
     embedding_model_alias: str = "embedding"
     embedding_dimensions: int = Field(default=1536, ge=128, le=8192)
     llm_timeout_seconds: float = Field(default=120.0, ge=5, le=900)
