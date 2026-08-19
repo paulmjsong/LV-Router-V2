@@ -27,11 +27,11 @@ class Settings(BaseSettings):
     litellm_default_api_key: str = "sk-change-me"
     litellm_keys_json: str = "{}"
     local_router_model_alias: str = "local-router"
-    local_router_max_tokens: int = Field(default=128, ge=64, le=1024)
-    local_answer_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    local_router_max_tokens: int = Field(default=64, ge=32, le=256)
+    local_router_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     embedding_model_alias: str = "embedding"
     embedding_dimensions: int = Field(default=1536, ge=128, le=8192)
-    llm_timeout_seconds: float = Field(default=240.0, ge=5, le=900)
+    llm_timeout_seconds: float = Field(default=120.0, ge=5, le=900)
     allow_direct_provider_url: bool = False
 
     auth_mode: Literal["dev", "oidc", "cloudflare_access", "openwebui"] = "dev"

@@ -29,25 +29,22 @@ class FakeRouterLLM:
         return json.loads(content)
 
 
-def settings(min_confidence: float = 0.72):
+def settings(min_confidence: float = 0.55):
     return SimpleNamespace(
         local_router_model_alias="local-router",
-        local_router_max_tokens=2200,
-        local_answer_min_confidence=min_confidence,
+        local_router_max_tokens=64,
+        local_router_min_confidence=min_confidence,
     )
 
 
 @pytest.mark.asyncio
-async def test_local_router_can_return_final_answer_in_one_call() -> None:
+async def test_local_router_returns_compact_decision_only() -> None:
     llm = FakeRouterLLM(
         {
-            "action": "answer",
             "workflow": "direct",
             "model_tier": "local-fast",
             "use_documents": False,
             "confidence": 0.95,
-            "reason": "Simple general question.",
-            "answer": "Paris.",
         }
     )
     router = LocalSemanticRouter(llm, settings())
@@ -60,22 +57,20 @@ async def test_local_router_can_return_final_answer_in_one_call() -> None:
         run_id="run-1",
     )
     assert llm.calls == 1
-    assert outcome.decision.action == "answer"
-    assert outcome.decision.answer == "Paris."
+    assert outcome.decision.workflow == WorkflowId.DIRECT
+    assert outcome.decision.model_tier == ModelTier.LOCAL_FAST
     assert llm.kwargs["model_alias"] == "local-router"
+    assert llm.kwargs["max_tokens"] == 64
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_local_answer_delegates_to_small_cloud() -> None:
+async def test_low_confidence_decision_falls_back_to_local_direct() -> None:
     llm = FakeRouterLLM(
         {
-            "action": "answer",
             "workflow": "direct",
             "model_tier": "local-fast",
             "use_documents": False,
             "confidence": 0.40,
-            "reason": "Uncertain.",
-            "answer": "Maybe.",
         }
     )
     router = LocalSemanticRouter(llm, settings())
@@ -88,9 +83,8 @@ async def test_low_confidence_local_answer_delegates_to_small_cloud() -> None:
         run_id="run-2",
     )
     assert outcome.used_fallback is True
-    assert outcome.decision.action == "delegate"
     assert outcome.decision.workflow == WorkflowId.DIRECT
-    assert outcome.decision.model_tier == ModelTier.CLOUD_SMALL
+    assert outcome.decision.model_tier == ModelTier.LOCAL_FAST
 
 
 def test_stage_policy_uses_router_tier_not_query_scoring() -> None:

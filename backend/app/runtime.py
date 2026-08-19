@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID, uuid4
@@ -11,6 +12,7 @@ from langgraph.types import Command
 
 from .auth import UserContext
 from .config import Settings
+from .llm import LLMStreamChunk
 from .repositories import ConversationRepository, RunRepository
 from .routing import LocalSemanticRouter, StageModelPolicy
 from .schemas import (
@@ -18,6 +20,7 @@ from .schemas import (
     ChatResponse,
     ModelTier,
     PendingAction,
+    Quality,
     SourceCitation,
     WorkflowId,
     WorkflowInfo,
@@ -45,7 +48,7 @@ WORKFLOW_SPECS: dict[WorkflowId, WorkflowSpec] = {
     WorkflowId.DIRECT: WorkflowSpec(
         WorkflowId.DIRECT,
         "Direct inference",
-        "One model call for a general request delegated by the local router or selected explicitly.",
+        "One model call for a general request selected by the local router or the user.",
         frozenset({"member", "editor", "admin"}),
     ),
     WorkflowId.DOMAIN_RAG: WorkflowSpec(
@@ -83,7 +86,10 @@ class ResolvedRoute:
     use_documents: bool
     reason: str
     router_alias: str | None = None
-    local_answer: str | None = None
+
+
+TokenSink = Callable[[LLMStreamChunk], Awaitable[None]]
+RouteSink = Callable[[ResolvedRoute, str], Awaitable[None]]
 
 
 class WorkflowRuntime:
@@ -96,6 +102,7 @@ class WorkflowRuntime:
         conversations: ConversationRepository,
         settings: Settings,
     ) -> None:
+        self.services = services
         self.semantic_router = LocalSemanticRouter(services.llm, settings)
         self.policy: StageModelPolicy = services.policy
         self.runs = runs
@@ -185,6 +192,24 @@ class WorkflowRuntime:
             "recursion_limit": 30,
         }
 
+    @staticmethod
+    def _visible_stage(workflow: WorkflowId, quality: Quality) -> str:
+        if workflow in {WorkflowId.DIRECT, WorkflowId.DOMAIN_RAG}:
+            return "answer"
+        if workflow == WorkflowId.PAPER:
+            if quality == Quality.FAST:
+                return "fast_draft"
+            if quality == Quality.HIGH:
+                return "final"
+            return "draft"
+        if workflow == WorkflowId.GRANT:
+            if quality == Quality.FAST:
+                return "fast_draft"
+            if quality == Quality.HIGH:
+                return "final"
+            return "draft"
+        return "proposal"
+
     async def _resolve_route(
         self,
         *,
@@ -217,44 +242,34 @@ class WorkflowRuntime:
         )
         decision = outcome.decision
 
-        # Passing collection IDs or use_documents=true is an explicit grounding request.
-        # The local model may not bypass it by returning an ungrounded local answer.
+        workflow = decision.workflow
         documents_requested = bool(request.collection_ids) or request.use_documents is True
-        if decision.action == "answer" and documents_requested:
-            return ResolvedRoute(
-                workflow=WorkflowId.DOMAIN_RAG,
-                recommended_tier=ModelTier.CLOUD_SMALL,
-                use_documents=True,
-                reason="Documents were explicitly selected, so the request is grounded through RAG.",
-                router_alias=self.settings.local_router_model_alias,
-            )
+        if documents_requested and workflow == WorkflowId.DIRECT:
+            workflow = WorkflowId.DOMAIN_RAG
 
-        if decision.action == "answer":
-            return ResolvedRoute(
-                workflow=WorkflowId.DIRECT,
-                recommended_tier=ModelTier.LOCAL_FAST,
-                use_documents=False,
-                reason=decision.reason,
-                router_alias=self.settings.local_router_model_alias,
-                local_answer=decision.answer.strip(),
-            )
-
-        self._authorize(decision.workflow, user)
+        self._authorize(workflow, user)
         use_documents = request.use_documents if request.use_documents is not None else decision.use_documents
         if request.collection_ids:
             use_documents = True
-        if decision.workflow == WorkflowId.DOMAIN_RAG:
+        if workflow == WorkflowId.DOMAIN_RAG:
             use_documents = True
 
         return ResolvedRoute(
-            workflow=decision.workflow,
+            workflow=workflow,
             recommended_tier=decision.model_tier,
             use_documents=bool(use_documents),
-            reason=decision.reason,
+            reason=outcome.reason,
             router_alias=self.settings.local_router_model_alias,
         )
 
-    async def execute(self, request: ChatRequest, user: UserContext) -> ChatResponse:
+    async def execute(
+        self,
+        request: ChatRequest,
+        user: UserContext,
+        *,
+        token_sink: TokenSink | None = None,
+        route_sink: RouteSink | None = None,
+    ) -> ChatResponse:
         run_id = uuid4()
         conversation_id = request.conversation_id or uuid4()
         raw_history = await self.conversations.list_recent(
@@ -282,34 +297,21 @@ class WorkflowRuntime:
             quality=request.quality.value,
         )
 
-        if route.local_answer is not None:
-            response = ChatResponse(
-                run_id=run_id,
-                conversation_id=conversation_id,
-                workflow=WorkflowId.DIRECT,
-                route_reason=route.reason,
-                answer=route.local_answer,
-                model_tiers=[self.settings.local_router_model_alias],
-                sources=[],
-                status="completed",
-            )
-            await self.runs.update(run_id, status="completed", answer=response.answer)
-            await self.conversations.append_turn(
-                conversation_id=conversation_id,
-                user_id=user.user_id,
-                query=request.query,
-                answer=response.answer,
-                workflow_id=WorkflowId.DIRECT,
-                run_id=run_id,
-            )
-            return response
+        visible_stage = self._visible_stage(route.workflow, request.quality)
+        visible_alias = self.policy.stage_alias(
+            recommended_tier=route.recommended_tier,
+            quality=request.quality,
+            stage=visible_stage,
+        )
+        if route_sink is not None:
+            await route_sink(route, visible_alias)
 
         graph = self.graphs[route.workflow]
         config = self._config(thread_id)
         initial_events: list[dict[str, str]] = []
         if route.router_alias:
             initial_events.append(
-                {"run_id": str(run_id), "alias": route.router_alias, "stage": "answer_or_delegate"}
+                {"run_id": str(run_id), "alias": route.router_alias, "stage": "route"}
             )
         history = self._history_messages(history_rows)
         initial_state = {
@@ -338,7 +340,16 @@ class WorkflowRuntime:
         }
 
         try:
-            result = await graph.ainvoke(initial_state, config=config)
+            if token_sink is not None and route.workflow != WorkflowId.WEBSITE:
+                async with self.services.llm.stream_run(
+                    run_id=str(run_id),
+                    sink=token_sink,
+                    stages={visible_stage},
+                ):
+                    result = await graph.ainvoke(initial_state, config=config)
+            else:
+                result = await graph.ainvoke(initial_state, config=config)
+
             response = await self._response_from_graph(
                 graph=graph,
                 config=config,

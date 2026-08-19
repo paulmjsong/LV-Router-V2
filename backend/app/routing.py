@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Sequence
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -11,77 +11,39 @@ from .llm import LLMGateway, LLMResult
 from .schemas import ModelTier, Quality, WorkflowId
 
 
-LOCAL_ROUTER_SYSTEM = """You are the local router for a research-lab AI platform.
+LOCAL_ROUTER_SYSTEM = """Route one request for a research-lab AI platform.
 
-Choose exactly one action:
-
-- answer: Only for a simple general request that can be answered correctly from the conversation alone in 40 words or fewer.
-- delegate: Use when the request needs documents, tools, persistent state, website/repository access, a paper/grant workflow, a longer answer, or stronger reasoning.
-
-Workflows:
-- direct: general inference
-- domain_rag: answer using authorized documents
-- paper: research-paper work
-- grant: grant/proposal work
-- website: website/repository work
-
-Model tiers:
-- local-fast: easy local inference
-- cloud-small: routine stronger reasoning/drafting
-- cloud-large: difficult reasoning or important final review
+Workflows: direct, domain_rag, paper, grant, website.
+Model tiers: local-fast, cloud-small, cloud-large.
 
 Rules:
-- Never claim access to documents, websites, repositories, or databases unless delegated to the appropriate workflow.
-- Document-dependent requests → domain_rag with use_documents=true.
-- Paper work → paper.
-- Grant work → grant.
-- Website/repository changes → website.
-- Longer but easy general requests → direct + local-fast.
-- Difficult general requests → direct + cloud-small or cloud-large.
-- Prefer local-fast when sufficient.
+- Documents are required -> domain_rag and use_documents=true.
+- Research-paper work -> paper.
+- Grant/proposal work -> grant.
+- Website or repository work -> website.
+- Otherwise -> direct.
+- Prefer local-fast when sufficient; use cloud-small for nontrivial work and cloud-large only for difficult synthesis or important review.
+- Select only an allowed workflow.
+- Do not answer the request. Do not explain the decision.
 
-If action=answer:
-workflow=direct, model_tier=local-fast, use_documents=false.
-
-If action=delegate:
-answer must be empty.
-
-Return only valid JSON with:
-action, workflow, model_tier, use_documents, confidence, reason, answer.
-
-Keep reason under 10 words. Do not output reasoning or Markdown.
+Return JSON only with exactly: workflow, model_tier, use_documents, confidence.
 """
 
 
 class LocalRouteDecision(BaseModel):
-    action: Literal["answer", "delegate"]
     workflow: WorkflowId
     model_tier: ModelTier
     use_documents: bool = False
     confidence: float = Field(ge=0.0, le=1.0)
-    reason: str = Field(min_length=1, max_length=1000)
-    answer: str = Field(default="", max_length=50000)
 
     @model_validator(mode="after")
     def validate_contract(self) -> "LocalRouteDecision":
         if self.workflow == WorkflowId.AUTO:
             raise ValueError("The local router cannot return workflow=auto")
-        if self.action == "answer":
-            if self.workflow != WorkflowId.DIRECT:
-                raise ValueError("A local answer must use workflow=direct")
-            if self.model_tier != ModelTier.LOCAL_FAST:
-                raise ValueError("A local answer must use model_tier=local-fast")
-            if self.use_documents:
-                raise ValueError("A local answer cannot claim document use")
-            if not self.answer.strip():
-                raise ValueError("A local answer must include answer text")
-        else:
-            if self.answer.strip():
-                raise ValueError("A delegated decision must leave answer empty")
-            if self.workflow == WorkflowId.DOMAIN_RAG and not self.use_documents:
-                raise ValueError("domain_rag requires use_documents=true")
-            if self.workflow == WorkflowId.DIRECT and self.model_tier == ModelTier.LOCAL_FAST:
-                raise ValueError("Delegated direct inference must use a cloud tier")
+        if self.workflow == WorkflowId.DOMAIN_RAG and not self.use_documents:
+            raise ValueError("domain_rag requires use_documents=true")
+        if self.workflow == WorkflowId.DIRECT and self.use_documents:
+            raise ValueError("direct cannot use documents")
         return self
 
 
@@ -89,22 +51,19 @@ class LocalRouteDecision(BaseModel):
 class RouterOutcome:
     decision: LocalRouteDecision
     llm_result: LLMResult
+    reason: str
     used_fallback: bool = False
 
 
 class LocalSemanticRouter:
-    """One local-model call that either returns the final answer or delegates.
-
-    The call still goes through LiteLLM, so it is budgeted, logged, and auditable. The
-    application does not inspect query length or keyword counts.
-    """
+    """Use one small local-model call for a compact routing decision only."""
 
     def __init__(self, llm: LLMGateway, settings: Settings) -> None:
         self.llm = llm
         self.settings = settings
 
     @staticmethod
-    def _history_text(history: Sequence[dict[str, str]], max_chars: int = 2000) -> str:
+    def _history_text(history: Sequence[dict[str, str]], max_chars: int = 1200) -> str:
         blocks: list[str] = []
         used = 0
         for item in reversed(history):
@@ -116,20 +75,18 @@ class LocalSemanticRouter:
             if used + len(block) > max_chars:
                 break
             blocks.append(block)
-            used += len(block) + 2
+            used += len(block) + 1
         blocks.reverse()
-        return "\n\n".join(blocks)
+        return "\n".join(blocks)
 
     @staticmethod
-    def _fallback(reason: str) -> LocalRouteDecision:
+    def _fallback() -> LocalRouteDecision:
+        # An invalid router output must not silently create a paid cloud call.
         return LocalRouteDecision(
-            action="delegate",
             workflow=WorkflowId.DIRECT,
-            model_tier=ModelTier.CLOUD_SMALL,
+            model_tier=ModelTier.LOCAL_FAST,
             use_documents=False,
             confidence=0.0,
-            reason=reason,
-            answer="",
         )
 
     async def decide(
@@ -142,16 +99,14 @@ class LocalSemanticRouter:
         user: UserContext,
         run_id: str,
     ) -> RouterOutcome:
-        allowed = ", ".join(item.value for item in allowed_workflows)
-        prior = self._history_text(history) or "None"
+        allowed = ",".join(item.value for item in allowed_workflows)
+        prior = self._history_text(history) or "none"
         user_prompt = (
-            f"ALLOWED WORKFLOWS: {allowed}\n"
-            f"AUTHORIZED DOCUMENT COLLECTIONS SELECTED: {collection_count}\n\n"
-            f"PRIOR CONVERSATION:\n{prior}\n\n"
-            f"CURRENT USER REQUEST:\n{query}\n\n"
-            "/no_think\n"
-            "Return the required JSON immediately. "
-            "For action=answer, keep the answer concise."
+            f"allowed={allowed}\n"
+            f"selected_document_collections={collection_count}\n"
+            f"history={prior}\n"
+            f"request={query}\n"
+            "/no_think"
         )
         result = await self.llm.chat(
             user=user,
@@ -162,7 +117,7 @@ class LocalSemanticRouter:
             ],
             run_id=run_id,
             workflow_id=WorkflowId.AUTO.value,
-            stage="answer_or_delegate",
+            stage="route",
             temperature=0.0,
             max_tokens=self.settings.local_router_max_tokens,
             response_format={"type": "json_object"},
@@ -173,28 +128,34 @@ class LocalSemanticRouter:
                 self.llm.extract_json_object(result.content)
             )
         except (ValueError, ValidationError) as exc:
-            fallback = self._fallback(
-                f"The local router returned an invalid structured decision; "
-                f"falling back to direct cloud inference ({type(exc).__name__})."
+            return RouterOutcome(
+                decision=self._fallback(),
+                llm_result=result,
+                reason=f"Invalid local routing output ({type(exc).__name__}); used local direct fallback.",
+                used_fallback=True,
             )
-            return RouterOutcome(fallback, result, used_fallback=True)
 
-        allowed_set = set(allowed_workflows)
-        if decision.workflow not in allowed_set:
-            fallback = self._fallback(
-                "The local router selected a workflow that this user is not allowed to run; "
-                "falling back to direct cloud inference."
+        if decision.workflow not in set(allowed_workflows):
+            return RouterOutcome(
+                decision=self._fallback(),
+                llm_result=result,
+                reason="The local router selected a disallowed workflow; used local direct fallback.",
+                used_fallback=True,
             )
-            return RouterOutcome(fallback, result, used_fallback=True)
 
-        if decision.action == "answer" and decision.confidence < self.settings.local_answer_min_confidence:
-            fallback = self._fallback(
-                "The local model was not confident enough to return its own answer; "
-                "delegating to direct cloud inference."
+        if decision.confidence < self.settings.local_router_min_confidence:
+            return RouterOutcome(
+                decision=self._fallback(),
+                llm_result=result,
+                reason="The local router was uncertain; used local direct fallback.",
+                used_fallback=True,
             )
-            return RouterOutcome(fallback, result, used_fallback=True)
 
-        return RouterOutcome(decision, result, used_fallback=False)
+        reason = (
+            f"Local router selected {decision.workflow.value} with "
+            f"{decision.model_tier.value} (confidence {decision.confidence:.2f})."
+        )
+        return RouterOutcome(decision, result, reason=reason, used_fallback=False)
 
 
 class StageModelPolicy:

@@ -61,7 +61,10 @@ def local_deployment(alias: str) -> dict[str, Any]:
             zero_cost=True,
         )
     if backend == "ollama":
-        model_id = env("OLLAMA_MODEL_ID", "qwen3:4b")
+        if alias == "local-router":
+            model_id = env("OLLAMA_ROUTER_MODEL_ID", "qwen3:0.6b")
+        else:
+            model_id = env("OLLAMA_MODEL_ID", "qwen3:4b")
         return deployment(
             alias=alias,
             model=f"ollama_chat/{model_id}",
@@ -112,8 +115,8 @@ if env_bool("ALLOW_REMOTE_ROUTER_FALLBACK", False):
 
 router_settings: dict[str, Any] = {
     "routing_strategy": env("LITELLM_ROUTING_STRATEGY", "least-busy"),
-    "num_retries": int(env("LITELLM_NUM_RETRIES", "2")),
-    "timeout": int(env("LITELLM_REQUEST_TIMEOUT", "120")),
+    "num_retries": int(env("LITELLM_NUM_RETRIES", "0")),
+    "timeout": int(env("LITELLM_REQUEST_TIMEOUT", "240")),
     "fallbacks": fallbacks,
 }
 if env("REDIS_HOST"):

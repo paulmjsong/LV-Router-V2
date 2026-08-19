@@ -1,21 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
 from openai import APITimeoutError
+from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import UserContext, get_current_user, verify_openai_backend_key
-from .runtime import WorkflowRuntime
+from .llm import LLMStreamChunk
+from .runtime import ResolvedRoute, WorkflowRuntime
 from .schemas import ChatRequest, ChatResponse, Quality, WorkflowId
 
 
+logger = logging.getLogger("saegyeol.openai_compat")
 router = APIRouter(prefix="/v1", tags=["OpenAI compatibility"])
 
 
@@ -29,7 +34,7 @@ MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
 }
 
 MODEL_DESCRIPTIONS: dict[str, str] = {
-    "lab-auto": "Local answer-or-delegate router",
+    "lab-auto": "Local semantic router",
     "lab-direct": "Explicit direct inference",
     "lab-rag": "Domain RAG over authorized collections",
     "lab-paper": "Research-paper workflow",
@@ -123,6 +128,8 @@ async def _execute_request(
     payload: OpenAIChatRequest,
     request: Request,
     user: UserContext,
+    token_sink: Callable[[LLMStreamChunk], Awaitable[None]] | None = None,
+    route_sink: Callable[[ResolvedRoute, str], Awaitable[None]] | None = None,
 ) -> ChatResponse:
     query = _latest_user_query(payload.messages)
     match = _APPROVAL.fullmatch(query)
@@ -158,17 +165,22 @@ async def _execute_request(
             use_documents=use_documents,
         ),
         user,
+        token_sink=token_sink,
+        route_sink=route_sink,
+    )
+
+
+def _approval_notice(response: ChatResponse) -> str:
+    if response.status != "awaiting_approval":
+        return ""
+    return (
+        f"\n\nApproval required. Reply `/approve {response.run_id}` to continue, "
+        f"or `/reject {response.run_id} <reason>` to reject it."
     )
 
 
 def _display_answer(response: ChatResponse) -> str:
-    answer = response.answer
-    if response.status == "awaiting_approval":
-        answer += (
-            f"\n\nApproval required. Reply `/approve {response.run_id}` to continue, "
-            f"or `/reject {response.run_id} <reason>` to reject it."
-        )
-    return answer
+    return response.answer + _approval_notice(response)
 
 
 def _completion_payload(
@@ -203,41 +215,170 @@ def _completion_payload(
     }
 
 
-def _sse_stream(
+def _chunk_payload(
     *,
     completion_id: str,
     model: str,
-    content: str,
+    created: int,
+    content: str | None = None,
+    role: str | None = None,
+    finish_reason: str | None = None,
+) -> str:
+    delta: dict[str, str] = {}
+    if role is not None:
+        delta["role"] = role
+    if content is not None:
+        delta["content"] = content
+    item = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": model,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+    }
+    return f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+
+def _error_message(exc: BaseException) -> str:
+    if isinstance(exc, HTTPException):
+        return str(exc.detail)
+    if isinstance(exc, APITimeoutError):
+        return "The selected model timed out before completing its response."
+    logger.error(
+        "Streaming request failed: %s",
+        exc,
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+    return "The request failed. Check the backend logs for details."
+
+
+def _stream_request(
+    *,
+    payload: OpenAIChatRequest,
+    request: Request,
+    user: UserContext,
+    completion_id: str,
 ) -> StreamingResponse:
     created = int(time.time())
 
     async def events():
-        first = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-        }
-        body = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
-        }
-        final = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-        }
-        for item in (first, body, final):
-            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
-        yield "data: [DONE]\n\n"
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        answer_token_seen = False
+        served_model_seen = False
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+        async def token_sink(chunk: LLMStreamChunk) -> None:
+            await queue.put(("token", chunk))
+
+        async def route_sink(route: ResolvedRoute, alias: str) -> None:
+            label = "Auto route" if payload.model == "lab-auto" else "Selected route"
+            content = f"> **{label}:** `{route.workflow.value}` → `{alias}`\n\n"
+            await queue.put(("route", content))
+
+        async def runner() -> None:
+            try:
+                response = await _execute_request(
+                    payload=payload,
+                    request=request,
+                    user=user,
+                    token_sink=token_sink,
+                    route_sink=route_sink,
+                )
+                await queue.put(("done", response))
+            except Exception as exc:
+                await queue.put(("error", exc))
+
+        task = asyncio.create_task(runner())
+        yield _chunk_payload(
+            completion_id=completion_id,
+            model=payload.model,
+            created=created,
+            role="assistant",
+        )
+
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == "route":
+                    yield _chunk_payload(
+                        completion_id=completion_id,
+                        model=payload.model,
+                        created=created,
+                        content=str(value),
+                    )
+                    continue
+
+                if kind == "token":
+                    chunk: LLMStreamChunk = value
+                    if not served_model_seen:
+                        served_model_seen = True
+                        yield _chunk_payload(
+                            completion_id=completion_id,
+                            model=payload.model,
+                            created=created,
+                            content=f"> **Served model:** `{chunk.served_model}`\n\n",
+                        )
+                    if chunk.content:
+                        answer_token_seen = True
+                        yield _chunk_payload(
+                            completion_id=completion_id,
+                            model=payload.model,
+                            created=created,
+                            content=chunk.content,
+                        )
+                    continue
+
+                if kind == "error":
+                    yield _chunk_payload(
+                        completion_id=completion_id,
+                        model=payload.model,
+                        created=created,
+                        content=f"\n\n**Error:** {_error_message(value)}",
+                    )
+                    yield _chunk_payload(
+                        completion_id=completion_id,
+                        model=payload.model,
+                        created=created,
+                        finish_reason="stop",
+                    )
+                    yield "data: [DONE]\n\n"
+                    break
+
+                response: ChatResponse = value
+                if not answer_token_seen:
+                    yield _chunk_payload(
+                        completion_id=completion_id,
+                        model=payload.model,
+                        created=created,
+                        content=_display_answer(response),
+                    )
+                else:
+                    notice = _approval_notice(response)
+                    if notice:
+                        yield _chunk_payload(
+                            completion_id=completion_id,
+                            model=payload.model,
+                            created=created,
+                            content=notice,
+                        )
+
+                yield _chunk_payload(
+                    completion_id=completion_id,
+                    model=payload.model,
+                    created=created,
+                    finish_reason="stop",
+                )
+                yield "data: [DONE]\n\n"
+                break
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/models")
@@ -264,24 +405,17 @@ async def chat_completions(
     request: Request,
     user: UserContext = Depends(get_current_user),
 ):
-    try:
-        response = await _execute_request(
+    completion_id = f"chatcmpl-{uuid4().hex}"
+    if payload.stream:
+        return _stream_request(
             payload=payload,
             request=request,
             user=user,
+            completion_id=completion_id,
         )
-    except APITimeoutError as exc:
-        raise HTTPException(
-            status_code=504,
-            detail=(
-                "The selected model did not return a complete response before "
-                "the configured timeout."
-            ),
-        ) from exc
+
+    response = await _execute_request(payload=payload, request=request, user=user)
     content = _display_answer(response)
-    completion_id = f"chatcmpl-{uuid4().hex}"
-    if payload.stream:
-        return _sse_stream(completion_id=completion_id, model=payload.model, content=content)
     return JSONResponse(
         _completion_payload(
             completion_id=completion_id,

@@ -50,29 +50,17 @@ services:
       - -c
       - |
         set -eu
-
         attempt=0
-
-        until mc alias set \
-          local \
-          http://minio:9000 \
-          "$${MINIO_ROOT_USER}" \
-          "$${MINIO_ROOT_PASSWORD}" \
-          >/dev/null 2>&1
-        do
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1; do
           attempt=$$((attempt + 1))
-
           if [ "$$attempt" -ge 60 ]; then
             echo "ERROR: MinIO did not become ready after 60 attempts." >&2
             exit 1
           fi
-
           echo "Waiting for MinIO... attempt $$attempt/60"
           sleep 2
         done
-
         mc mb --ignore-existing "local/$${S3_BUCKET}"
-
         echo "MinIO bucket is ready: $${S3_BUCKET}"
     restart: "no"
 
@@ -108,6 +96,9 @@ services:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
     profiles: ["ollama"]
     restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_MAX_LOADED_MODELS: "2"
     volumes:
       - ollama-data:/root/.ollama
     ports:
@@ -121,33 +112,34 @@ services:
         condition: service_started
     environment:
       OLLAMA_HOST: http://ollama:11434
+      OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
       OLLAMA_MODEL_ID: ${OLLAMA_MODEL_ID:-qwen3:4b}
     entrypoint:
       - /bin/sh
       - -c
       - |
         set -eu
-
         attempt=0
-
         until ollama list >/dev/null 2>&1; do
           attempt=$$((attempt + 1))
-
           if [ "$$attempt" -ge 60 ]; then
             echo "ERROR: Ollama did not become ready after 60 attempts." >&2
             exit 1
           fi
-
           echo "Waiting for Ollama... attempt $$attempt/60"
           sleep 2
         done
-
-        echo "Pulling model: $${OLLAMA_MODEL_ID}"
+        echo "Pulling router model: $${OLLAMA_ROUTER_MODEL_ID}"
+        ollama pull "$${OLLAMA_ROUTER_MODEL_ID}"
+        echo "Pulling answer model: $${OLLAMA_MODEL_ID}"
         ollama pull "$${OLLAMA_MODEL_ID}"
-
+        ollama show "$${OLLAMA_ROUTER_MODEL_ID}" >/dev/null
         ollama show "$${OLLAMA_MODEL_ID}" >/dev/null
-
-        echo "Ollama model is ready: $${OLLAMA_MODEL_ID}"
+        echo "Warming router model..."
+        ollama run "$${OLLAMA_ROUTER_MODEL_ID}" "Return OK only. /no_think" >/dev/null
+        echo "Warming answer model..."
+        ollama run "$${OLLAMA_MODEL_ID}" "Return OK only. /no_think" >/dev/null
+        echo "Ollama models are ready and warm."
     restart: "no"
 
   litellm:
@@ -176,6 +168,7 @@ services:
       LOCAL_MODEL_EXTRA_JSON: ${LOCAL_MODEL_EXTRA_JSON:-{}}
       VLLM_API_BASE: ${VLLM_API_BASE:-http://vllm:8000/v1}
       VLLM_API_KEY: ${VLLM_API_KEY:-local-vllm-key}
+      OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
       OLLAMA_MODEL_ID: ${OLLAMA_MODEL_ID:-qwen3:4b}
       OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://ollama:11434}
       ALLOW_LOCAL_MODEL_FALLBACK: ${ALLOW_LOCAL_MODEL_FALLBACK:-false}
@@ -223,8 +216,8 @@ services:
       LITELLM_DEFAULT_API_KEY: ${BACKEND_LITELLM_KEY:-sk-change-me}
       LITELLM_KEYS_JSON: ${LITELLM_KEYS_JSON:-{}}
       LOCAL_ROUTER_MODEL_ALIAS: local-router
-      LOCAL_ROUTER_MAX_TOKENS: ${LOCAL_ROUTER_MAX_TOKENS:-128}
-      LOCAL_ANSWER_MIN_CONFIDENCE: ${LOCAL_ANSWER_MIN_CONFIDENCE:-0.72}
+      LOCAL_ROUTER_MAX_TOKENS: ${LOCAL_ROUTER_MAX_TOKENS:-64}
+      LOCAL_ROUTER_MIN_CONFIDENCE: ${LOCAL_ROUTER_MIN_CONFIDENCE:-0.0}
       EMBEDDING_MODEL_ALIAS: embedding
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-240}
@@ -298,9 +291,10 @@ services:
       OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
       OPENAI_API_CONFIGS: >-
         {"0":{"enable":true,"model_ids":["lab-auto","lab-direct","lab-rag","lab-paper","lab-grant","lab-website"]}}
-      # Prevent Open WebUI from making hidden title/tag LLM calls in addition to the user request.
       ENABLE_TITLE_GENERATION: "false"
       ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
       ENABLE_EVALUATION_ARENA_MODELS: "false"
       ENABLE_COMMUNITY_SHARING: "false"
       ENABLE_BASE_MODELS_CACHE: "true"
