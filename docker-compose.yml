@@ -135,13 +135,8 @@ services:
         ollama pull "$${OLLAMA_MODEL_ID}"
         ollama show "$${OLLAMA_ROUTER_MODEL_ID}" >/dev/null
         ollama show "$${OLLAMA_MODEL_ID}" >/dev/null
-        echo "Warming router model..."
-        ollama run "$${OLLAMA_ROUTER_MODEL_ID}" "Return OK only. /no_think" >/dev/null
-        echo "Warming answer model..."
-        ollama run "$${OLLAMA_MODEL_ID}" "Return OK only. /no_think" >/dev/null
-        echo "Ollama models are ready and warm."
+        echo "Ollama models are downloaded."
     restart: "no"
-
   litellm:
     image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm-database:v1.97.0}
     restart: unless-stopped
@@ -150,8 +145,11 @@ services:
       - -c
     command:
       - |
+        if [ "$${LOCAL_BACKEND}" = "ollama" ]; then
+          python /config/ollama_startup_gate.py
+        fi
         python /config/render_config.py &&
-        exec litellm --config /tmp/litellm-config.yaml --host 0.0.0.0 --port 4000 --num_workers ${LITELLM_WORKERS:-2}
+        exec litellm --config /tmp/litellm-config.yaml --host 0.0.0.0 --port 4000 --num_workers ${LITELLM_WORKERS:-1}
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-saegyeol}:${POSTGRES_PASSWORD:-saegyeol}@postgres:5432/${POSTGRES_DB:-saegyeol}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-change-me}
@@ -171,6 +169,8 @@ services:
       OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
       OLLAMA_MODEL_ID: ${OLLAMA_MODEL_ID:-qwen3:4b-instruct-2507-q4_K_M}
       OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://ollama:11434}
+      OLLAMA_STARTUP_TIMEOUT_SECONDS: ${OLLAMA_STARTUP_TIMEOUT_SECONDS:-1800}
+      OLLAMA_PRELOAD_TIMEOUT_SECONDS: ${OLLAMA_PRELOAD_TIMEOUT_SECONDS:-300}
       ALLOW_LOCAL_MODEL_FALLBACK: ${ALLOW_LOCAL_MODEL_FALLBACK:-false}
       ALLOW_REMOTE_ROUTER_FALLBACK: ${ALLOW_REMOTE_ROUTER_FALLBACK:-false}
 
@@ -192,6 +192,7 @@ services:
       LANGFUSE_HOST: ${LANGFUSE_HOST:-}
     volumes:
       - ./infra/litellm/render_config.py:/config/render_config.py:ro
+      - ./infra/litellm/ollama_startup_gate.py:/config/ollama_startup_gate.py:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -202,7 +203,7 @@ services:
       interval: 10s
       timeout: 6s
       retries: 30
-      start_period: 30s
+      start_period: ${LITELLM_START_PERIOD:-20m}
     ports:
       - "127.0.0.1:4000:4000"
 

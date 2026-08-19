@@ -7,4 +7,4 @@ frontend/node_modules/
 frontend/dist/
 .DS_Store
 saegyeol_streaming_patch_bundle/
-.patch-*
+.patch*
