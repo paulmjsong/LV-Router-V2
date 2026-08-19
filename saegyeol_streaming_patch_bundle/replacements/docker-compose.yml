@@ -1,0 +1,320 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-saegyeol}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saegyeol}
+      POSTGRES_DB: ${POSTGRES_DB:-saegyeol}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-saegyeol} -d ${POSTGRES_DB:-saegyeol}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-saegyeol}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-saegyeol}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
+      S3_BUCKET: ${S3_BUCKET:-saegyeol-documents}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        attempt=0
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$$attempt" -ge 60 ]; then
+            echo "ERROR: MinIO did not become ready after 60 attempts." >&2
+            exit 1
+          fi
+          echo "Waiting for MinIO... attempt $$attempt/60"
+          sleep 2
+        done
+        mc mb --ignore-existing "local/$${S3_BUCKET}"
+        echo "MinIO bucket is ready: $${S3_BUCKET}"
+    restart: "no"
+
+  vllm:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
+    profiles: ["gpu"]
+    restart: unless-stopped
+    ipc: host
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+    command: >-
+      --model ${LOCAL_MODEL_ID:-Qwen/Qwen3-8B}
+      --served-model-name ${LOCAL_MODEL_ID:-Qwen/Qwen3-8B}
+      --host 0.0.0.0
+      --port 8000
+      --api-key ${VLLM_API_KEY:-local-vllm-key}
+      --dtype auto
+      --max-model-len ${LOCAL_MAX_MODEL_LEN:-16384}
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.90}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${VLLM_GPU_COUNT:-1}
+              capabilities: [gpu]
+    volumes:
+      - huggingface-cache:/root/.cache/huggingface
+    ports:
+      - "127.0.0.1:8001:8000"
+
+  ollama:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    profiles: ["ollama"]
+    restart: unless-stopped
+    environment:
+      OLLAMA_KEEP_ALIVE: "-1"
+      OLLAMA_MAX_LOADED_MODELS: "2"
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "127.0.0.1:11434:11434"
+
+  ollama-init:
+    image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
+    profiles: ["ollama"]
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
+      OLLAMA_MODEL_ID: ${OLLAMA_MODEL_ID:-qwen3:4b}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        attempt=0
+        until ollama list >/dev/null 2>&1; do
+          attempt=$$((attempt + 1))
+          if [ "$$attempt" -ge 60 ]; then
+            echo "ERROR: Ollama did not become ready after 60 attempts." >&2
+            exit 1
+          fi
+          echo "Waiting for Ollama... attempt $$attempt/60"
+          sleep 2
+        done
+        echo "Pulling router model: $${OLLAMA_ROUTER_MODEL_ID}"
+        ollama pull "$${OLLAMA_ROUTER_MODEL_ID}"
+        echo "Pulling answer model: $${OLLAMA_MODEL_ID}"
+        ollama pull "$${OLLAMA_MODEL_ID}"
+        ollama show "$${OLLAMA_ROUTER_MODEL_ID}" >/dev/null
+        ollama show "$${OLLAMA_MODEL_ID}" >/dev/null
+        echo "Warming router model..."
+        ollama run "$${OLLAMA_ROUTER_MODEL_ID}" "Return OK only. /no_think" >/dev/null
+        echo "Warming answer model..."
+        ollama run "$${OLLAMA_MODEL_ID}" "Return OK only. /no_think" >/dev/null
+        echo "Ollama models are ready and warm."
+    restart: "no"
+
+  litellm:
+    image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm-database:v1.97.0}
+    restart: unless-stopped
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - |
+        python /config/render_config.py &&
+        exec litellm --config /tmp/litellm-config.yaml --host 0.0.0.0 --port 4000 --num_workers ${LITELLM_WORKERS:-2}
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-saegyeol}:${POSTGRES_PASSWORD:-saegyeol}@postgres:5432/${POSTGRES_DB:-saegyeol}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-change-me}
+      LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-change-this-once-and-never-rotate}
+      LITELLM_ROUTING_STRATEGY: ${LITELLM_ROUTING_STRATEGY:-least-busy}
+      LITELLM_NUM_RETRIES: ${LITELLM_NUM_RETRIES:-0}
+      LITELLM_REQUEST_TIMEOUT: ${LITELLM_REQUEST_TIMEOUT:-240}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ""
+
+      LOCAL_BACKEND: ${LOCAL_BACKEND:-vllm}
+      LOCAL_MODEL_ID: ${LOCAL_MODEL_ID:-Qwen/Qwen3-8B}
+      LOCAL_MODEL_EXTRA_JSON: ${LOCAL_MODEL_EXTRA_JSON:-{}}
+      VLLM_API_BASE: ${VLLM_API_BASE:-http://vllm:8000/v1}
+      VLLM_API_KEY: ${VLLM_API_KEY:-local-vllm-key}
+      OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
+      OLLAMA_MODEL_ID: ${OLLAMA_MODEL_ID:-qwen3:4b}
+      OLLAMA_API_BASE: ${OLLAMA_API_BASE:-http://ollama:11434}
+      ALLOW_LOCAL_MODEL_FALLBACK: ${ALLOW_LOCAL_MODEL_FALLBACK:-false}
+      ALLOW_REMOTE_ROUTER_FALLBACK: ${ALLOW_REMOTE_ROUTER_FALLBACK:-false}
+
+      CLOUD_SMALL_MODEL: ${CLOUD_SMALL_MODEL:-openai/gpt-5-mini}
+      CLOUD_SMALL_API_KEY: ${CLOUD_SMALL_API_KEY:-}
+      CLOUD_SMALL_API_BASE: ${CLOUD_SMALL_API_BASE:-}
+      CLOUD_SMALL_EXTRA_JSON: ${CLOUD_SMALL_EXTRA_JSON:-{}}
+      CLOUD_LARGE_MODEL: ${CLOUD_LARGE_MODEL:-openai/gpt-5}
+      CLOUD_LARGE_API_KEY: ${CLOUD_LARGE_API_KEY:-}
+      CLOUD_LARGE_API_BASE: ${CLOUD_LARGE_API_BASE:-}
+      CLOUD_LARGE_EXTRA_JSON: ${CLOUD_LARGE_EXTRA_JSON:-{}}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-openai/text-embedding-3-small}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
+      EMBEDDING_EXTRA_JSON: ${EMBEDDING_EXTRA_JSON:-{}}
+
+      LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+      LANGFUSE_HOST: ${LANGFUSE_HOST:-}
+    volumes:
+      - ./infra/litellm/render_config.py:/config/render_config.py:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4000/health/readiness', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 30
+      start_period: 30s
+    ports:
+      - "127.0.0.1:4000:4000"
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-saegyeol}:${POSTGRES_PASSWORD:-saegyeol}@postgres:5432/${POSTGRES_DB:-saegyeol}
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_DEFAULT_API_KEY: ${BACKEND_LITELLM_KEY:-sk-change-me}
+      LITELLM_KEYS_JSON: ${LITELLM_KEYS_JSON:-{}}
+      LOCAL_ROUTER_MODEL_ALIAS: local-router
+      LOCAL_ROUTER_MAX_TOKENS: ${LOCAL_ROUTER_MAX_TOKENS:-64}
+      LOCAL_ROUTER_MIN_CONFIDENCE: ${LOCAL_ROUTER_MIN_CONFIDENCE:-0.0}
+      EMBEDDING_MODEL_ALIAS: embedding
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-240}
+      CHUNK_SIZE: ${CHUNK_SIZE:-1400}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
+      RAG_TOP_K: ${RAG_TOP_K:-8}
+      RAG_CONTEXT_CHARS: ${RAG_CONTEXT_CHARS:-18000}
+      RAG_QUERY_CHARS: ${RAG_QUERY_CHARS:-8000}
+      CONVERSATION_HISTORY_MESSAGES: ${CONVERSATION_HISTORY_MESSAGES:-16}
+      CONVERSATION_HISTORY_CHARS: ${CONVERSATION_HISTORY_CHARS:-24000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+      AUTH_MODE: ${AUTH_MODE:-openwebui}
+      OPENWEBUI_BACKEND_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
+      OPENWEBUI_IDENTITY_JWT_SECRET: ${OPENWEBUI_IDENTITY_JWT_SECRET:-change-this-openwebui-identity-secret}
+      OPENWEBUI_IDENTITY_JWT_HEADER: X-OpenWebUI-User-Jwt
+      OPENWEBUI_DEFAULT_TEAM_ID: ${OPENWEBUI_DEFAULT_TEAM_ID:-lab}
+      LAB_ADMIN_API_KEY: ${LAB_ADMIN_API_KEY:-}
+      AUTH_TOKEN_HEADER: ${AUTH_TOKEN_HEADER:-Cf-Access-Jwt-Assertion}
+      OIDC_JWKS_URL: ${OIDC_JWKS_URL:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-}
+      OIDC_USER_ID_CLAIM: ${OIDC_USER_ID_CLAIM:-sub}
+      OIDC_EMAIL_CLAIM: ${OIDC_EMAIL_CLAIM:-email}
+      OIDC_NAME_CLAIM: ${OIDC_NAME_CLAIM:-name}
+      OIDC_ROLES_CLAIM: ${OIDC_ROLES_CLAIM:-roles}
+      OIDC_TEAM_CLAIM: ${OIDC_TEAM_CLAIM:-team_id}
+
+      OBJECT_STORE: ${OBJECT_STORE:-s3}
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      S3_BUCKET: ${S3_BUCKET:-saegyeol-documents}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-saegyeol}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_REPOSITORY: ${GITHUB_REPOSITORY:-}
+      GITHUB_BASE_BRANCH: ${GITHUB_BASE_BRANCH:-main}
+      GITHUB_ALLOWED_PATHS: ${GITHUB_ALLOWED_PATHS:-src/content,src/data,public}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      litellm:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 20
+      start_period: 20s
+    volumes:
+      - ./imports:/imports:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  open-webui:
+    image: ${OPENWEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0}
+    restart: unless-stopped
+    environment:
+      WEBUI_NAME: ${WEBUI_NAME:-SaeGyeol Lab AI}
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY:-change-this-openwebui-session-secret}
+      WEBUI_AUTH: "true"
+      ENABLE_SIGNUP: ${OPENWEBUI_ENABLE_SIGNUP:-true}
+      DEFAULT_USER_ROLE: user
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URL: http://backend:8000/v1
+      OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
+      OPENAI_API_CONFIGS: >-
+        {"0":{"enable":true,"model_ids":["lab-auto","lab-direct","lab-rag","lab-paper","lab-grant","lab-website"]}}
+      ENABLE_TITLE_GENERATION: "false"
+      ENABLE_TAGS_GENERATION: "false"
+      ENABLE_FOLLOW_UP_GENERATION: "false"
+      ENABLE_AUTOCOMPLETE_GENERATION: "false"
+      ENABLE_EVALUATION_ARENA_MODELS: "false"
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_BASE_MODELS_CACHE: "true"
+      MODELS_CACHE_TTL: "300"
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      FORWARD_USER_INFO_HEADER_JWT_SECRET: ${OPENWEBUI_IDENTITY_JWT_SECRET:-change-this-openwebui-identity-secret}
+      FORWARD_USER_INFO_HEADER_JWT: X-OpenWebUI-User-Jwt
+      ENABLE_DIRECT_CONNECTIONS: "false"
+    volumes:
+      - open-webui-data:/app/backend/data
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:8080"
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  huggingface-cache:
+  ollama-data:
+  open-webui-data:
