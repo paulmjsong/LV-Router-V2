@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 from .auth import UserContext
 from .config import Settings
 
-logger = logging.getLogger("saegyeol.llm")
+logger = logging.getLogger("infonet.llm")
 
 
 @dataclass(slots=True)
@@ -32,6 +32,7 @@ class LLMStreamChunk:
     requested_alias: str
     served_model: str
     finish_reason: str | None = None
+    event_type: str = "token"
 
 
 StreamSink = Callable[[LLMStreamChunk], Awaitable[None]]
@@ -125,6 +126,27 @@ class LLMGateway:
             yield
         finally:
             self._stream_registrations.pop(run_id, None)
+
+    async def emit_control(
+        self,
+        *,
+        run_id: str,
+        content: str,
+        event_type: str,
+        requested_alias: str = "router",
+        served_model: str = "",
+    ) -> None:
+        registration = self._stream_registrations.get(run_id)
+        if registration is None:
+            return
+        await registration.sink(
+            LLMStreamChunk(
+                content=content,
+                requested_alias=requested_alias,
+                served_model=served_model,
+                event_type=event_type,
+            )
+        )
 
     @staticmethod
     def _chat_kwargs(

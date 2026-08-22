@@ -1,245 +1,229 @@
-# SaeGyeol Lab AI
+# Infonet AI Router
 
-A multi-user lab AI platform built around:
+A multi-user research-lab AI platform with:
 
-- **Open WebUI** for accounts, conversations, and workflow selection.
-- **FastAPI + LangGraph** for task routing and specialist workflows.
-- **LiteLLM Proxy** as the only LLM/embedding gateway.
-- **vLLM or Ollama** for the local answer-or-delegate model.
-- **PostgreSQL + pgvector** for persistent state and hybrid RAG.
-- **MinIO/S3** for original documents.
+- **Open WebUI** for accounts and chat.
+- **One parent LangGraph** for route selection, policy validation, and subgraph dispatch.
+- **Isolated workflow subgraphs** for chat, PDF Q&A, GIST regulations, and three placeholders.
+- **LiteLLM Proxy** as the only LLM and embedding gateway.
+- **Ollama or vLLM** for local inference.
+- **PostgreSQL + pgvector** for checkpoints, documents, and hybrid retrieval.
+- **MinIO/S3** for original uploaded files.
 
-## What changed from the earlier prototype
+## Workflow IDs
 
-The old path was:
+Open WebUI exposes one automatic selector plus six workflow selections:
+
+| ID | Purpose |
+|---|---|
+| `auto` | Local semantic router selects a workflow and logical model tier. |
+| `chat` | General direct inference. |
+| `pdf` | Answer from Open WebUI PDF File Context or indexed PDF collections. |
+| `regulations` | Answer only from the reserved GIST regulations corpus. |
+| `paper` | Deliberately minimal paper-assistant placeholder. |
+| `grant` | Deliberately minimal grant-assistant placeholder. |
+| `website` | Deliberately non-mutating website-assistant placeholder. |
+
+The paper, grant, and website entries are not represented as finished multi-agent systems. Each currently contains one clearly labeled placeholder model stage.
+
+## Graph structure
 
 ```text
-cloud router LLM -> simple/complex answer LLM
+Parent LangGraph
+  START
+    → route
+    → validate_route
+    → announce_route
+    → conditional dispatch
+        ├─ chat subgraph
+        ├─ pdf subgraph
+        ├─ regulations subgraph
+        ├─ paper placeholder subgraph
+        ├─ grant placeholder subgraph
+        └─ website placeholder subgraph
+    → finalize
+    → END
 ```
 
-The new automatic path is:
+Routing, model-tier validation, and the selected workflow now live in the same LangGraph trace and PostgreSQL checkpoint thread. The stable thread is derived from the user and Open WebUI conversation ID. This replaces the previous design that selected one of several independent graphs in `WorkflowRuntime`.
+
+## Model-tier policy
+
+The local router emits a compact semantic classification:
+
+```json
+{
+  "workflow": "chat",
+  "difficulty": "simple",
+  "confidence": 0.92
+}
+```
+
+Python then maps `simple`, `standard`, and `advanced` to `local-fast`, `cloud-small`,
+and `cloud-large`. This is deliberately easier for the small router model than asking it to reason
+about provider aliases directly. The application validates the decision before dispatch:
+
+- malformed, disallowed, or low-confidence routing uses a **visible `cloud-small` fallback**;
+- automatic/BALANCED specialist routing has a `cloud-small` floor;
+- balanced `local-fast` is accepted only for `chat/simple` above `LOCAL_FAST_MIN_CONFIDENCE`;
+- an explicit `fast` or `high` quality override selects `local-fast` or `cloud-large`.
+
+The UI displays the selected workflow, difficulty, confidence, fallback status, logical alias, and served model. LiteLLM maps the logical alias to a concrete deployment and enforces provider policy, keys, budgets, limits, retries, and accounting.
+
+## RAG design
+
+### PDF Q&A
+
+Two input modes are supported:
+
+1. **Open WebUI File Context**: attach a PDF and keep File Context enabled. Open WebUI extracts/retrieves file context and injects it into the OpenAI-compatible request; the backend separates that evidence from the user's question.
+2. **Indexed PDF collection**: upload PDFs through `/api/documents/upload`, pass the collection IDs in request metadata, and use `pdf` or `auto`. Reserved system collections are excluded from this path.
+
+Indexed PDF retrieval is restricted to PDF MIME types and uses:
 
 ```text
-local model through LiteLLM
-   ├─ answers locally -> return that answer; no second model call
-   └─ delegates -> LangGraph workflow -> one or more workflow model calls through LiteLLM
+query embedding through LiteLLM
++ pgvector cosine retrieval
++ PostgreSQL full-text retrieval
++ reciprocal-rank fusion
 ```
 
-The local model returns a structured decision containing:
+### GIST regulations
+
+At startup, the backend creates a reserved public collection identified by:
 
 ```text
-action, workflow, model_tier, use_documents, confidence, reason, answer
+gist-regulations
 ```
 
-It selects from `direct`, `domain_rag`, `paper`, `grant`, and `website`. It also recommends one of `local-fast`, `cloud-small`, or `cloud-large`. There is no query-length or keyword complexity score.
+Only administrators can modify it. The `regulations` subgraph retrieves exclusively from this collection, so it cannot silently mix ordinary lab files into an institutional-policy answer.
 
-Hard rules remain outside the model: role permissions, explicit workflow selection, document access, budgets, and approval before repository changes.
+The old Jireumgil FAISS directory is **not loaded**. That serialized index is tied to its original embedding setup, is local-process state, and previously required dangerous deserialization. Re-index the original regulation source PDFs/DOCX/TXT files into pgvector instead. See [docs/JIREUMGIL_MIGRATION.md](docs/JIREUMGIL_MIGRATION.md).
 
-## Deployment location
-
-Run this on a **lab-controlled Linux server**. For a multi-user lab deployment, use an NVIDIA GPU and the vLLM profile. The Ollama profile is provided for CPU-only development and functional testing, not for serving twenty simultaneous users.
-
-## 1. Configure
+## Configure
 
 ```bash
 cp .env.example .env
 python scripts/generate_secrets.py
 ```
 
-Copy the generated values into `.env`, then set:
+Copy the generated values into `.env`. At minimum configure:
 
 ```dotenv
-CLOUD_SMALL_MODEL=...
-CLOUD_SMALL_API_KEY=...
-CLOUD_LARGE_MODEL=...
-CLOUD_LARGE_API_KEY=...
-EMBEDDING_MODEL=...
-EMBEDDING_API_KEY=...
-EMBEDDING_DIMENSIONS=1536
+LITELLM_MASTER_KEY=sk-...
+LITELLM_SALT_KEY=sk-...
+BACKEND_LITELLM_KEY=sk-...
+OPENWEBUI_BACKEND_KEY=sk-...
+OPENWEBUI_IDENTITY_JWT_SECRET=...
+OPENWEBUI_SECRET_KEY=...
+LAB_ADMIN_API_KEY=sk-...
 ```
 
-`EMBEDDING_DIMENSIONS` must match the configured embedding model before documents are indexed.
+For local CPU development:
 
-For initial setup, `BACKEND_LITELLM_KEY` may equal `LITELLM_MASTER_KEY`. Before lab use, replace it with a restricted LiteLLM virtual key.
+```dotenv
+LOCAL_BACKEND=ollama
+OLLAMA_ROUTER_MODEL_ID=qwen3:0.6b
+OLLAMA_MODEL_ID=qwen3:4b-instruct-2507-q4_K_M
+```
 
-## 2. Start
-
-### NVIDIA GPU / vLLM — recommended
-
-Prerequisites: Docker Engine, Docker Compose, an NVIDIA driver, and NVIDIA Container Toolkit.
-
-Set:
+For a lab GPU server:
 
 ```dotenv
 LOCAL_BACKEND=vllm
 LOCAL_MODEL_ID=Qwen/Qwen3-8B
 ```
 
-Run:
+Cloud and embedding aliases require their configured provider credentials. Existing installations may keep their old PostgreSQL/MinIO usernames and database names; those are storage credentials, not product branding.
+
+## Start
+
+### Windows or CPU development
+
+```powershell
+docker compose --profile ollama up -d --build
+```
+
+### NVIDIA GPU / vLLM
 
 ```bash
 docker compose --profile gpu up -d --build
 ```
 
-### CPU-only development / Ollama
-
-Set:
-
-```dotenv
-LOCAL_BACKEND=ollama
-OLLAMA_MODEL_ID=qwen3:4b
-```
-
-Run:
-
-```bash
-docker compose --profile ollama up -d --build
-```
-
 Open:
 
 ```text
-http://<server-ip>:3000
+http://localhost:3000
 ```
+
+Open WebUI defaults to `auto`. Notes, Calendar, Automations, and Open WebUI's own
+sub-agent feature are disabled so they cannot add unrelated UI surfaces or hidden model calls to this
+platform. Workspace administration should remain restricted to administrators.
+
+### Branding boundary
+
+The configured product name is `Infonet AI Router`. Open WebUI may still identify its upstream
+software on the unauthenticated login surface. This repository does not disguise or patch third-party
+branding; complete white-labeling requires a permitted Open WebUI fork/license or a custom frontend.
 
 Useful checks:
 
 ```bash
 docker compose ps
-docker compose logs -f open-webui backend litellm
+docker compose logs -f ollama-init ollama litellm backend open-webui
 curl http://127.0.0.1:8000/api/health
+curl http://127.0.0.1:4000/health/readiness
 ```
 
-## 3. Use the interface
+## Index PDF documents
 
-Open WebUI exposes these workflow models:
-
-| Model | Behavior |
-|---|---|
-| `lab-auto` | Local model answers or delegates automatically |
-| `lab-direct` | Explicit direct inference |
-| `lab-rag` | Hybrid RAG over accessible collections |
-| `lab-paper` | Paper workflow |
-| `lab-grant` | Grant workflow |
-| `lab-website` | Website proposal with approval |
-
-Use `lab-auto` as the default. Explicit workflow models bypass automatic workflow selection.
-
-Open WebUI title/tag generation is disabled in `docker-compose.yml`, so a visible user request does not trigger hidden background LLM calls. Re-enable those features only after assigning them a separate local-only task endpoint.
-
-For a website proposal requiring approval, reply with:
-
-```text
-/approve <run-id>
-```
-
-or:
-
-```text
-/reject <run-id> <reason>
-```
-
-Approval creates a branch and pull request; it does not push directly to the protected branch.
-
-## 4. Add RAG documents
-
-Place files under the project’s `imports/` directory. Supported formats are PDF, DOCX, TXT, Markdown, HTML, and JSON.
-
-Create a team collection:
+Create a collection:
 
 ```bash
 docker compose exec backend python -m app.admin_cli create-collection \
-  --name "Lab Knowledge" \
-  --description "Shared papers and institutional documents" \
+  --name "Project PDFs" \
+  --description "Shared PDF collection" \
   --visibility team
 ```
 
-Copy the returned collection ID, then upload files:
+Upload PDF files using the returned collection ID:
 
 ```bash
 docker compose exec backend python -m app.admin_cli upload \
   --collection-id <collection-uuid> \
-  /imports/document1.pdf /imports/document2.docx
+  /imports/paper.pdf
 ```
 
-List collections:
+## Index GIST regulations
+
+Place the original regulation source files under `imports/gist-regulations/`, then run:
 
 ```bash
-docker compose exec backend python -m app.admin_cli list-collections
+docker compose exec backend python -m app.admin_cli upload-regulations \
+  /imports/gist-regulations
 ```
 
-The indexing path is:
+The CLI scans supported files in the directory recursively.
 
-```text
-file -> MinIO -> parser -> chunks -> LiteLLM embedding alias -> pgvector
-```
+Do not copy `index.faiss` or `index.pkl` into the new service. The source documents must be embedded again through the configured LiteLLM `embedding` alias.
 
-The query path is:
+## Upgrade notes from the previous build
 
-```text
-query -> embedding through LiteLLM -> vector + PostgreSQL full-text search -> RRF -> workflow answer
-```
+- Existing PostgreSQL and MinIO usernames may remain unchanged. They are storage credentials, not UI branding.
+- Old prefixed Open WebUI model IDs are removed. Recreate the Open WebUI container, start a new chat, and select `auto`.
+- Existing `.env` secrets must be preserved. Add the new routing/GIST variables rather than replacing the file.
+- The previous one-file website approval flow is intentionally removed while `website` is a placeholder. Old interrupted website runs cannot be resumed by this version.
+- The old Jireumgil FAISS files are not loaded; re-index the reviewed source documents as described below.
 
-## Model-routing boundaries
-
-### Application/local router
-
-The local model decides:
-
-- return a final local answer; or
-- delegate to a workflow;
-- recommend `local-fast`, `cloud-small`, or `cloud-large`;
-- state whether documents are needed.
-
-### LangGraph
-
-LangGraph executes the selected specialist workflow and persists checkpoints in PostgreSQL.
-
-### LiteLLM
-
-LiteLLM does not decide whether a query is a paper, grant, RAG, or website task. It receives a stable alias and handles:
-
-- provider translation;
-- virtual keys and model access;
-- team/user budgets;
-- deployment load balancing;
-- retries and configured fallbacks;
-- usage and cost logs.
-
-By default, `local-router` has **no cloud fallback**. A failed local router does not silently create a paid routing call. Set `ALLOW_REMOTE_ROUTER_FALLBACK=true` only if that trade-off is intentional.
-
-## Authentication
-
-Open WebUI forwards a signed user-identity JWT to the backend. The backend verifies both:
-
-1. the Open WebUI backend connection key; and
-2. the signed identity token.
-
-Open WebUI `admin` maps to lab roles `member, editor, admin`; a normal Open WebUI user maps to `member`. Replace this simple mapping with institutional groups/OIDC claims before broader deployment if different teams or permissions are required.
-
-After lab accounts are provisioned, set:
-
-```dotenv
-OPENWEBUI_ENABLE_SIGNUP=false
-```
-
-and restart Open WebUI.
-
-## Tests and static validation
+## Validation
 
 ```bash
+python -m compileall backend/app backend/tests infra/litellm scripts
+python scripts/validate_static.py
+
 cd backend
 python -m pip install -e '.[dev]'
 pytest
-
-cd ..
-python -m compileall backend/app backend/tests infra/litellm scripts
-python scripts/validate_static.py
 ```
 
-## Important limits
-
-- The OpenAI-compatible backend currently buffers each workflow result and then emits it to Open WebUI; graph nodes do not yet stream tokens individually.
-- Open WebUI is the chat interface. Document collection administration is intentionally handled through the included CLI in this version.
-- The local router is prompted and schema-validated, but it is still a model. Evaluate routing accuracy on labeled lab requests before relying on it for cost-critical policy.
-- Sensitive collections need an explicit policy stating which model tiers may receive their retrieved text. Collection visibility alone does not implement data-residency policy.
+A complete integration test still requires Docker, PostgreSQL, MinIO, LiteLLM, and a functioning local/cloud model configuration.

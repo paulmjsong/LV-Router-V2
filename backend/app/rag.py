@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Collection
 from uuid import UUID
 
 from sqlalchemy import bindparam, text
@@ -24,7 +25,15 @@ class RAGService:
         collection_ids: list[UUID],
         user: UserContext,
         run_id: str,
+        system_keys: Collection[str] = (),
+        mime_types: Collection[str] = (),
+        exclude_system_collections: bool = False,
     ) -> list[SourceCitation]:
+        """Hybrid retrieval with access control applied inside the SQL query.
+
+        `collection_ids` is used for user-selected material such as uploaded PDFs.
+        `system_keys` restricts retrieval to reserved collections such as GIST regulations.
+        """
         retrieval_query = query[: self.settings.rag_query_chars]
         vector = (
             await self.llm.embed_texts(
@@ -36,7 +45,7 @@ class RAGService:
         )[0]
         vector_literal = "[" + ",".join(format(value, ".10g") for value in vector) + "]"
 
-        collection_clause = ""
+        filters: list[str] = []
         params: dict = {
             "user_id": user.user_id,
             "team_id": user.team_id,
@@ -46,8 +55,24 @@ class RAGService:
             "top_k": self.settings.rag_top_k,
         }
         if collection_ids:
-            collection_clause = "AND c.collection_id IN :collection_ids"
+            filters.append("c.collection_id IN :collection_ids")
             params["collection_ids"] = list(collection_ids)
+        if system_keys:
+            filters.append("col.system_key IN :system_keys")
+            params["system_keys"] = list(system_keys)
+        if mime_types:
+            filters.append("d.mime_type IN :mime_types")
+            params["mime_types"] = list(mime_types)
+        if exclude_system_collections:
+            filters.append("col.system_key IS NULL")
+
+        # Never let a system-key query silently widen to arbitrary user collections.
+        if system_keys and collection_ids:
+            raise ValueError("system_keys and collection_ids are mutually exclusive")
+
+        filter_sql = ""
+        if filters:
+            filter_sql = "AND " + " AND ".join(filters)
 
         statement = text(
             f"""
@@ -63,7 +88,7 @@ class RAGService:
                     OR col.visibility = 'public'
                     OR (col.visibility = 'team' AND col.team_id IS NOT DISTINCT FROM :team_id)
                 )
-                {collection_clause}
+                {filter_sql}
             ),
             vector_hits AS (
                 SELECT id,
@@ -105,6 +130,10 @@ class RAGService:
         )
         if collection_ids:
             statement = statement.bindparams(bindparam("collection_ids", expanding=True))
+        if system_keys:
+            statement = statement.bindparams(bindparam("system_keys", expanding=True))
+        if mime_types:
+            statement = statement.bindparams(bindparam("mime_types", expanding=True))
 
         async with self.database.session() as session:
             rows = (await session.execute(statement, params)).mappings().all()

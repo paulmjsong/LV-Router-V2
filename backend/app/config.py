@@ -17,23 +17,24 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "SaeGyeol Lab AI"
+    app_name: str = "Infonet AI Router"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
 
-    database_url: str = "postgresql://saegyeol:saegyeol@postgres:5432/saegyeol"
+    database_url: str = "postgresql://infonet:infonet@postgres:5432/infonet"
 
     litellm_base_url: str = "http://litellm:4000"
     litellm_default_api_key: str = "sk-change-me"
     litellm_keys_json: str = "{}"
     local_router_model_alias: str = "local-router"
     local_router_max_tokens: int = Field(default=64, ge=32, le=256)
-    local_router_min_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
-    # Hard ceiling for local answer generation on CPU/dev deployments.
+    local_router_min_confidence: float = Field(default=0.55, ge=0.0, le=1.0)
+    local_router_fallback_tier: Literal["cloud-small", "cloud-large"] = "cloud-small"
+    local_fast_min_confidence: float = Field(default=0.85, ge=0.0, le=1.0)
     local_fast_max_tokens: int = Field(default=512, ge=64, le=4096)
     embedding_model_alias: str = "embedding"
     embedding_dimensions: int = Field(default=1536, ge=128, le=8192)
-    llm_timeout_seconds: float = Field(default=120.0, ge=5, le=900)
+    llm_timeout_seconds: float = Field(default=240.0, ge=5, le=900)
     allow_direct_provider_url: bool = False
 
     auth_mode: Literal["dev", "oidc", "cloudflare_access", "openwebui"] = "dev"
@@ -67,19 +68,22 @@ class Settings(BaseSettings):
     rag_top_k: int = Field(default=8, ge=1, le=30)
     rag_context_chars: int = Field(default=18000, ge=2000, le=100000)
     rag_query_chars: int = Field(default=8000, ge=500, le=30000)
+    pdf_attachment_context_chars: int = Field(default=30000, ge=2000, le=150000)
+
+    gist_regulations_system_key: str = "gist-regulations"
+    gist_regulations_collection_name: str = "GIST Regulations"
+    gist_regulations_collection_description: str = (
+        "Authoritative GIST regulations indexed for the Regulations workflow."
+    )
 
     object_store: Literal["local", "s3"] = "local"
     local_object_store_path: Path = Path("/data/documents")
     s3_endpoint_url: str | None = None
     s3_region: str = "us-east-1"
-    s3_bucket: str = "saegyeol-documents"
+    s3_bucket: str = "infonet-documents"
     s3_access_key_id: str | None = None
     s3_secret_access_key: str | None = None
 
-    github_token: str | None = None
-    github_repository: str | None = None
-    github_base_branch: str = "main"
-    github_allowed_paths: str = "src/content,src/data,public"
 
     @field_validator("litellm_base_url")
     @classmethod
@@ -124,10 +128,6 @@ class Settings(BaseSettings):
     @property
     def dev_role_set(self) -> set[str]:
         return {item.strip() for item in self.dev_default_roles.split(",") if item.strip()}
-
-    @property
-    def github_allowed_path_list(self) -> list[str]:
-        return [item.strip().strip("/") for item in self.github_allowed_paths.split(",") if item.strip()]
 
     @property
     def litellm_key_map(self) -> dict[str, str]:

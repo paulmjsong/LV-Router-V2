@@ -1,1 +1,1 @@
-"""SaeGyeol lab AI control plane."""
+"""Infonet AI Router control plane."""

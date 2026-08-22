@@ -16,7 +16,7 @@ def _headers() -> dict[str, str]:
         raise SystemExit("LAB_ADMIN_API_KEY is not configured in the backend container")
     return {
         "Authorization": f"Bearer {key}",
-        "X-Lab-User-Id": os.getenv("LABCTL_USER_ID", "lab-admin-cli"),
+        "X-Lab-User-Id": os.getenv("LABCTL_USER_ID", "infonet-admin-cli"),
         "X-Lab-Team-Id": os.getenv("LABCTL_TEAM_ID", "lab"),
         "X-Lab-User-Roles": os.getenv("LABCTL_ROLES", "member,editor,admin"),
     }
@@ -24,7 +24,7 @@ def _headers() -> dict[str, str]:
 
 def _request(method: str, path: str, **kwargs: Any) -> Any:
     base_url = os.getenv("LABCTL_BASE_URL", "http://localhost:8000").rstrip("/")
-    with httpx.Client(base_url=base_url, headers=_headers(), timeout=300) as client:
+    with httpx.Client(base_url=base_url, headers=_headers(), timeout=600) as client:
         response = client.request(method, path, **kwargs)
     if response.is_error:
         raise SystemExit(f"{response.status_code}: {response.text}")
@@ -50,18 +50,43 @@ def create_collection(args: argparse.Namespace) -> None:
     )
 
 
-def upload(args: argparse.Namespace) -> None:
+_SUPPORTED_DOCUMENT_SUFFIXES = {".pdf", ".docx", ".txt", ".md", ".markdown", ".html", ".htm", ".json"}
+
+
+def _expanded_paths(raw_paths: list[str]) -> list[Path]:
+    paths: list[Path] = []
+    for raw_path in raw_paths:
+        path = Path(raw_path).expanduser().resolve()
+        if path.is_dir():
+            paths.extend(
+                candidate
+                for candidate in sorted(path.rglob("*"))
+                if candidate.is_file() and candidate.suffix.lower() in _SUPPORTED_DOCUMENT_SUFFIXES
+            )
+        elif path.is_file():
+            paths.append(path)
+        else:
+            raise SystemExit(f"File or directory not found: {path}")
+    unique = list(dict.fromkeys(paths))
+    if not unique:
+        raise SystemExit("No supported documents were found")
+    return unique
+
+
+def _multipart_files(raw_paths: list[str]):
     opened = []
     files = []
+    for path in _expanded_paths(raw_paths):
+        handle = path.open("rb")
+        opened.append(handle)
+        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        files.append(("files", (path.name, handle, mime)))
+    return opened, files
+
+
+def upload(args: argparse.Namespace) -> None:
+    opened, files = _multipart_files(args.files)
     try:
-        for raw_path in args.files:
-            path = Path(raw_path).expanduser().resolve()
-            if not path.is_file():
-                raise SystemExit(f"File not found: {path}")
-            handle = path.open("rb")
-            opened.append(handle)
-            mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-            files.append(("files", (path.name, handle, mime)))
         result = _request(
             "POST",
             "/api/documents/upload",
@@ -74,8 +99,20 @@ def upload(args: argparse.Namespace) -> None:
             handle.close()
 
 
+def upload_regulations(args: argparse.Namespace) -> None:
+    opened, files = _multipart_files(args.files)
+    try:
+        result = _request("POST", "/api/regulations/upload", files=files)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    finally:
+        for handle in opened:
+            handle.close()
+
+
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description="Administer SaeGyeol Lab AI document collections")
+    root = argparse.ArgumentParser(
+        description="Administer Infonet AI Router document collections"
+    )
     sub = root.add_subparsers(dest="command", required=True)
 
     list_parser = sub.add_parser("list-collections")
@@ -91,6 +128,17 @@ def parser() -> argparse.ArgumentParser:
     uploader.add_argument("--collection-id", required=True)
     uploader.add_argument("files", nargs="+")
     uploader.set_defaults(func=upload)
+
+    regulations = sub.add_parser(
+        "upload-regulations",
+        help="Index source GIST regulation files into the reserved regulations collection",
+    )
+    regulations.add_argument(
+        "files",
+        nargs="+",
+        help="Source files or directories; directories are scanned recursively",
+    )
+    regulations.set_defaults(func=upload_regulations)
     return root
 
 

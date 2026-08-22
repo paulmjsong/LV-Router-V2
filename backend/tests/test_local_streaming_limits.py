@@ -19,7 +19,7 @@ def test_local_calls_disable_ollama_thinking() -> None:
         model_alias="local-fast",
         messages=[{"role": "user", "content": "hello"}],
         run_id="run",
-        workflow_id="direct",
+        workflow_id="chat",
         stage="answer",
         temperature=0.2,
         max_tokens=128,

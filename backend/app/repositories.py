@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -16,20 +15,32 @@ class CollectionRepository:
     def __init__(self, database: Database) -> None:
         self.database = database
 
+    @staticmethod
+    def _select_columns() -> str:
+        return (
+            "id, name, description, visibility, owner_user_id, team_id, "
+            "system_key, created_at"
+        )
+
     async def list_accessible(self, user: UserContext) -> list[CollectionInfo]:
         query = text(
-            """
-            SELECT id, name, description, visibility, owner_user_id, team_id, created_at
+            f"""
+            SELECT {self._select_columns()}
             FROM collections
             WHERE owner_user_id = :user_id
                OR visibility = 'public'
                OR (visibility = 'team' AND team_id IS NOT DISTINCT FROM :team_id)
-            ORDER BY name
+            ORDER BY system_key NULLS LAST, name
             """
         )
         async with self.database.session() as session:
-            rows = (await session.execute(query, {"user_id": user.user_id, "team_id": user.team_id})).mappings()
-            return [CollectionInfo(**dict(row)) for row in rows]
+            rows = (
+                await session.execute(
+                    query,
+                    {"user_id": user.user_id, "team_id": user.team_id},
+                )
+            ).mappings().all()
+        return [CollectionInfo(**dict(row)) for row in rows]
 
     async def create(self, payload: CollectionCreate, user: UserContext) -> CollectionInfo:
         if payload.visibility == Visibility.TEAM and not user.team_id:
@@ -38,10 +49,13 @@ class CollectionRepository:
             raise HTTPException(status_code=403, detail="Only administrators can create public collections")
         collection_id = uuid4()
         query = text(
-            """
-            INSERT INTO collections(id, name, description, visibility, owner_user_id, team_id)
-            VALUES (:id, :name, :description, :visibility, :owner_user_id, :team_id)
-            RETURNING id, name, description, visibility, owner_user_id, team_id, created_at
+            f"""
+            INSERT INTO collections(
+                id, name, description, visibility, owner_user_id, team_id, system_key
+            ) VALUES (
+                :id, :name, :description, :visibility, :owner_user_id, :team_id, NULL
+            )
+            RETURNING {self._select_columns()}
             """
         )
         async with self.database.session() as session:
@@ -59,12 +73,61 @@ class CollectionRepository:
                 )
             ).mappings().one()
             await commit(session)
-            return CollectionInfo(**dict(row))
+        return CollectionInfo(**dict(row))
+
+    async def ensure_system_collection(
+        self,
+        *,
+        system_key: str,
+        name: str,
+        description: str,
+    ) -> CollectionInfo:
+        """Create or update a reserved public collection and return it."""
+        query = text(
+            f"""
+            INSERT INTO collections(
+                id, name, description, visibility, owner_user_id, team_id, system_key
+            ) VALUES (
+                :id, :name, :description, 'public', 'system', NULL, :system_key
+            )
+            ON CONFLICT (system_key) WHERE system_key IS NOT NULL
+            DO UPDATE SET name=EXCLUDED.name, description=EXCLUDED.description
+            RETURNING {self._select_columns()}
+            """
+        )
+        async with self.database.session() as session:
+            row = (
+                await session.execute(
+                    query,
+                    {
+                        "id": uuid4(),
+                        "system_key": system_key,
+                        "name": name,
+                        "description": description,
+                    },
+                )
+            ).mappings().one()
+            await commit(session)
+        return CollectionInfo(**dict(row))
+
+    async def get_system_collection(self, system_key: str) -> CollectionInfo | None:
+        query = text(
+            f"""
+            SELECT {self._select_columns()}
+            FROM collections
+            WHERE system_key=:system_key
+            """
+        )
+        async with self.database.session() as session:
+            row = (
+                await session.execute(query, {"system_key": system_key})
+            ).mappings().first()
+        return CollectionInfo(**dict(row)) if row is not None else None
 
     async def get_accessible(self, collection_id: UUID, user: UserContext) -> CollectionInfo:
         query = text(
-            """
-            SELECT id, name, description, visibility, owner_user_id, team_id, created_at
+            f"""
+            SELECT {self._select_columns()}
             FROM collections
             WHERE id = :id
               AND (
@@ -87,6 +150,13 @@ class CollectionRepository:
 
     async def require_write(self, collection_id: UUID, user: UserContext) -> CollectionInfo:
         collection = await self.get_accessible(collection_id, user)
+        if collection.system_key is not None:
+            if "admin" not in user.roles:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only administrators can modify a system collection",
+                )
+            return collection
         is_owner = collection.owner_user_id == user.user_id
         is_team_editor = (
             collection.visibility == Visibility.TEAM
@@ -336,13 +406,36 @@ class RunRepository:
             )
             await commit(session)
 
+    async def update_route(
+        self,
+        run_id: UUID,
+        *,
+        workflow_id: WorkflowId,
+        route_reason: str,
+    ) -> None:
+        async with self.database.session() as session:
+            await session.execute(
+                text(
+                    """
+                    UPDATE workflow_runs
+                    SET workflow_id=:workflow_id, route_reason=:route_reason, updated_at=now()
+                    WHERE id=:id
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "workflow_id": workflow_id.value,
+                    "route_reason": route_reason,
+                },
+            )
+            await commit(session)
+
     async def update(
         self,
         run_id: UUID,
         *,
         status: str,
         answer: str | None = None,
-        pending_action: dict[str, Any] | None = None,
         error_message: str | None = None,
     ) -> None:
         query = text(
@@ -350,7 +443,6 @@ class RunRepository:
             UPDATE workflow_runs
             SET status=:status,
                 answer=COALESCE(:answer, answer),
-                pending_action=CAST(:pending_action AS jsonb),
                 error_message=:error_message,
                 updated_at=now()
             WHERE id=:id
@@ -363,53 +455,7 @@ class RunRepository:
                     "id": run_id,
                     "status": status,
                     "answer": answer,
-                    "pending_action": json.dumps(pending_action) if pending_action is not None else None,
                     "error_message": error_message,
                 },
             )
             await commit(session)
-
-    async def claim_for_resume(self, run_id: UUID, user: UserContext) -> dict[str, Any]:
-        """Atomically claim an approval run so the side effect cannot execute twice."""
-        query = text(
-            """
-            UPDATE workflow_runs
-            SET status='resuming', updated_at=now()
-            WHERE id=:id AND user_id=:user_id AND status='awaiting_approval'
-            RETURNING id, conversation_id, thread_id, user_id, team_id, workflow_id,
-                      route_reason, quality, status, answer, pending_action, error_message,
-                      created_at, updated_at
-            """
-        )
-        async with self.database.session() as session:
-            row = (
-                await session.execute(query, {"id": run_id, "user_id": user.user_id})
-            ).mappings().first()
-            if row is not None:
-                await commit(session)
-                return dict(row)
-            await session.rollback()
-
-        existing = await self.get_for_user(run_id, user)
-        raise HTTPException(
-            status_code=409,
-            detail=f"This run cannot be resumed from status: {existing['status']}",
-        )
-
-    async def get_for_user(self, run_id: UUID, user: UserContext) -> dict[str, Any]:
-        query = text(
-            """
-            SELECT id, conversation_id, thread_id, user_id, team_id, workflow_id,
-                   route_reason, quality, status, answer, pending_action, error_message,
-                   created_at, updated_at
-            FROM workflow_runs
-            WHERE id=:id AND user_id=:user_id
-            """
-        )
-        async with self.database.session() as session:
-            row = (
-                await session.execute(query, {"id": run_id, "user_id": user.user_id})
-            ).mappings().first()
-        if row is None:
-            raise HTTPException(status_code=404, detail="Workflow run not found")
-        return dict(row)

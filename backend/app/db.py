@@ -39,9 +39,12 @@ class Database:
                 visibility TEXT NOT NULL CHECK (visibility IN ('private', 'team', 'public')),
                 owner_user_id TEXT NOT NULL,
                 team_id TEXT,
+                system_key TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,
+            # Safe migration for databases created by earlier versions.
+            "ALTER TABLE collections ADD COLUMN IF NOT EXISTS system_key TEXT",
             """
             CREATE TABLE IF NOT EXISTS documents (
                 id UUID PRIMARY KEY,
@@ -83,7 +86,7 @@ class Database:
                 quality TEXT NOT NULL,
                 status TEXT NOT NULL,
                 answer TEXT,
-                pending_action JSONB,
+                pending_action JSONB, -- retained for compatibility with pre-placeholder runs
                 error_message TEXT,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                 updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -101,6 +104,7 @@ class Database:
                 created_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )
             """,
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_collections_system_key ON collections(system_key) WHERE system_key IS NOT NULL",
             "CREATE INDEX IF NOT EXISTS ix_collections_team ON collections(team_id)",
             "CREATE INDEX IF NOT EXISTS ix_documents_collection ON documents(collection_id)",
             "CREATE INDEX IF NOT EXISTS ix_chunks_collection ON document_chunks(collection_id)",
@@ -112,8 +116,6 @@ class Database:
             for statement in statements:
                 await connection.execute(text(statement))
 
-        # HNSW may be unavailable on older pgvector builds. Use a separate transaction so
-        # an unsupported index method cannot roll back the schema creation above.
         try:
             async with self.engine.begin() as connection:
                 await connection.execute(

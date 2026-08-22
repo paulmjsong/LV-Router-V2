@@ -78,7 +78,7 @@ def _service_user(request: Request, settings: Settings) -> UserContext | None:
     token = _bearer_token(request)
     if not token or not secrets.compare_digest(token, settings.lab_admin_api_key):
         return None
-    user_id = request.headers.get("X-Lab-User-Id", "lab-admin-cli").strip()
+    user_id = request.headers.get("X-Lab-User-Id", "infonet-admin-cli").strip()
     team_id = request.headers.get("X-Lab-Team-Id", settings.openwebui_default_team_id).strip() or None
     roles = _claim_as_set(request.headers.get("X-Lab-User-Roles")) or {"member", "editor", "admin"}
     return UserContext(user_id=user_id, team_id=team_id, roles=roles)

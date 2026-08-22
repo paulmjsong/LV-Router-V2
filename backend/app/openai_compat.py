@@ -16,30 +16,32 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .auth import UserContext, get_current_user, verify_openai_backend_key
 from .llm import LLMStreamChunk
-from .runtime import ResolvedRoute, WorkflowRuntime
+from .runtime import WorkflowRuntime
 from .schemas import ChatRequest, ChatResponse, Quality, WorkflowId
 
 
-logger = logging.getLogger("saegyeol.openai_compat")
+logger = logging.getLogger("infonet.openai_compat")
 router = APIRouter(prefix="/v1", tags=["OpenAI compatibility"])
 
 
 MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
-    "lab-auto": WorkflowId.AUTO,
-    "lab-direct": WorkflowId.DIRECT,
-    "lab-rag": WorkflowId.DOMAIN_RAG,
-    "lab-paper": WorkflowId.PAPER,
-    "lab-grant": WorkflowId.GRANT,
-    "lab-website": WorkflowId.WEBSITE,
+    "auto": WorkflowId.AUTO,
+    "chat": WorkflowId.CHAT,
+    "pdf": WorkflowId.PDF,
+    "regulations": WorkflowId.REGULATIONS,
+    "paper": WorkflowId.PAPER,
+    "grant": WorkflowId.GRANT,
+    "website": WorkflowId.WEBSITE,
 }
 
 MODEL_DESCRIPTIONS: dict[str, str] = {
-    "lab-auto": "Local semantic router",
-    "lab-direct": "Explicit direct inference",
-    "lab-rag": "Domain RAG over authorized collections",
-    "lab-paper": "Research-paper workflow",
-    "lab-grant": "Grant-proposal workflow",
-    "lab-website": "Website change proposal with approval",
+    "auto": "Automatic workflow and model selection",
+    "chat": "General chat",
+    "pdf": "PDF question answering",
+    "regulations": "GIST regulations question answering",
+    "paper": "Paper assistant placeholder",
+    "grant": "Grant assistant placeholder",
+    "website": "Website assistant placeholder",
 }
 
 
@@ -53,6 +55,7 @@ class OpenAIChatRequest(BaseModel):
     max_tokens: int | None = None
     user: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    files: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def _runtime(request: Request) -> WorkflowRuntime:
@@ -117,10 +120,109 @@ def _quality(metadata: dict[str, Any]) -> Quality:
         raise HTTPException(status_code=400, detail=f"Unsupported quality: {raw}") from exc
 
 
-_APPROVAL = re.compile(
-    r"^/(approve|reject)\s+([0-9a-fA-F-]{36})(?:\s+(.+))?$",
-    re.DOTALL,
+def _iter_scalar_strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for nested in value.values():
+            yield from _iter_scalar_strings(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from _iter_scalar_strings(nested)
+
+
+def _attachment_records(payload: OpenAIChatRequest) -> list[dict[str, Any]]:
+    records = list(payload.files)
+    metadata_files = payload.metadata.get("files", [])
+    if isinstance(metadata_files, list):
+        records.extend(item for item in metadata_files if isinstance(item, dict))
+    return records
+
+
+def _is_pdf_marker(value: str) -> bool:
+    lowered = value.lower().strip()
+    return (
+        re.search(r"\.pdf(?:\b|[\"'])", lowered) is not None
+        or "application/pdf" in lowered
+        or "application/x-pdf" in lowered
+    )
+
+
+def _has_pdf_attachment(payload: OpenAIChatRequest) -> bool:
+    # Open WebUI may place file metadata in the body, in metadata, or only in
+    # citation-wrapped message text before forwarding an OpenAI-compatible call.
+    for record in _attachment_records(payload):
+        if any(_is_pdf_marker(value) for value in _iter_scalar_strings(record)):
+            return True
+    if any(_is_pdf_marker(value) for value in _iter_scalar_strings(payload.metadata)):
+        return True
+    for message in payload.messages:
+        if any(_is_pdf_marker(value) for value in _iter_scalar_strings(message)):
+            return True
+    return False
+
+
+_CONTEXT_BLOCK = re.compile(
+    r"<(?P<tag>source|sources|context|file_context|attached_files)(?:\s[^>]*)?>"
+    r"(?P<body>.*?)</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
 )
+_USER_QUERY_BLOCK = re.compile(
+    r"<user_query(?:\s[^>]*)?>(?P<body>.*?)</user_query>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _extract_pdf_context(
+    *,
+    payload: OpenAIChatRequest,
+    raw_query: str,
+    has_pdf_attachment: bool,
+) -> tuple[str, str]:
+    """Extract Open WebUI's pre-injected File Context without treating it as the query."""
+    blocks: list[str] = []
+
+    def collect(text: str) -> None:
+        for match in _CONTEXT_BLOCK.finditer(text):
+            body = match.group("body").strip()
+            if body and body not in blocks:
+                blocks.append(body)
+
+    collect(raw_query)
+    explicit_query = _USER_QUERY_BLOCK.search(raw_query)
+    if explicit_query is not None:
+        cleaned_query = explicit_query.group("body").strip()
+    else:
+        cleaned_query = _CONTEXT_BLOCK.sub("", raw_query).strip()
+    stripped_query = _USER_QUERY_BLOCK.sub("", cleaned_query).strip()
+    if stripped_query:
+        cleaned_query = stripped_query
+
+    if has_pdf_attachment:
+        for message in payload.messages:
+            if message.get("role") != "system":
+                continue
+            text = _message_text(message.get("content")).strip()
+            if not text:
+                continue
+            before = len(blocks)
+            collect(text)
+            if len(blocks) == before:
+                lowered = text.lower()
+                # Open WebUI may inject file evidence as a plain system message rather
+                # than XML-like source blocks. Only accept it when a PDF is attached.
+                if (
+                    "file context" in lowered
+                    or "retrieved context" in lowered
+                    or "attached file" in lowered
+                    or ("sources" in lowered and "context" in lowered)
+                ):
+                    blocks.append(text)
+
+    context = "\n\n".join(blocks)
+    if not cleaned_query:
+        cleaned_query = "Answer the user's question using the uploaded PDF."
+    return cleaned_query, context
 
 
 async def _execute_request(
@@ -129,65 +231,52 @@ async def _execute_request(
     request: Request,
     user: UserContext,
     token_sink: Callable[[LLMStreamChunk], Awaitable[None]] | None = None,
-    route_sink: Callable[[ResolvedRoute, str], Awaitable[None]] | None = None,
 ) -> ChatResponse:
-    query = _latest_user_query(payload.messages)
-    match = _APPROVAL.fullmatch(query)
-    if match:
-        decision, run_id_text, feedback = match.groups()
-        try:
-            run_id = UUID(run_id_text)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="Invalid approval run ID") from exc
-        return await _runtime(request).resume(
-            run_id=run_id,
-            decision=decision,
-            feedback=feedback,
-            user=user,
-        )
-
     workflow = MODEL_TO_WORKFLOW.get(payload.model)
     if workflow is None:
-        raise HTTPException(status_code=404, detail=f"Unknown model/workflow: {payload.model}")
+        raise HTTPException(status_code=404, detail=f"Unknown workflow: {payload.model}")
+
+    raw_query = _latest_user_query(payload.messages)
+    has_pdf_attachment = _has_pdf_attachment(payload)
+    pdf_mode = workflow == WorkflowId.PDF or has_pdf_attachment
+    if pdf_mode:
+        query, attachment_context = _extract_pdf_context(
+            payload=payload,
+            raw_query=raw_query,
+            has_pdf_attachment=True,
+        )
+    else:
+        query, attachment_context = raw_query, ""
 
     collections = _collection_ids(payload.metadata)
-    use_documents: bool | None = payload.metadata.get("use_documents")
-    if workflow == WorkflowId.DOMAIN_RAG:
-        use_documents = True
+    runtime = _runtime(request)
+    attachment_context = attachment_context[: runtime.settings.pdf_attachment_context_chars]
+    has_pdf_attachment = (
+        has_pdf_attachment
+        or bool(attachment_context)
+        or (workflow == WorkflowId.PDF and bool(collections))
+    )
 
-    return await _runtime(request).execute(
+    return await runtime.execute(
         ChatRequest(
             query=query,
             conversation_id=_conversation_id(request, user),
             workflow=workflow,
             quality=_quality(payload.metadata),
             collection_ids=collections,
-            use_documents=use_documents,
+            use_documents=(workflow in {WorkflowId.PDF, WorkflowId.REGULATIONS}),
+            attachment_context=attachment_context,
+            has_pdf_attachment=has_pdf_attachment,
         ),
         user,
         token_sink=token_sink,
-        route_sink=route_sink,
     )
-
-
-def _approval_notice(response: ChatResponse) -> str:
-    if response.status != "awaiting_approval":
-        return ""
-    return (
-        f"\n\nApproval required. Reply `/approve {response.run_id}` to continue, "
-        f"or `/reject {response.run_id} <reason>` to reject it."
-    )
-
-
-def _display_answer(response: ChatResponse) -> str:
-    return response.answer + _approval_notice(response)
 
 
 def _completion_payload(
     *,
     completion_id: str,
     model: str,
-    content: str,
     response: ChatResponse,
 ) -> dict[str, Any]:
     return {
@@ -198,16 +287,18 @@ def _completion_payload(
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": content},
+                "message": {"role": "assistant", "content": response.answer},
                 "finish_reason": "stop",
             }
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
-        "saegyeol": {
+        "infonet": {
             "run_id": str(response.run_id),
             "conversation_id": str(response.conversation_id),
             "workflow": response.workflow.value,
             "route_reason": response.route_reason,
+            "route_fallback": response.route_fallback,
+            "route_difficulty": response.route_difficulty,
             "model_tiers": response.model_tiers,
             "status": response.status,
             "sources": [source.model_dump(mode="json") for source in response.sources],
@@ -267,12 +358,8 @@ def _stream_request(
         served_model_seen = False
 
         async def token_sink(chunk: LLMStreamChunk) -> None:
-            await queue.put(("token", chunk))
-
-        async def route_sink(route: ResolvedRoute, alias: str) -> None:
-            label = "Auto route" if payload.model == "lab-auto" else "Selected route"
-            content = f"> **{label}:** `{route.workflow.value}` → `{alias}`\n\n"
-            await queue.put(("route", content))
+            kind = "route" if chunk.event_type == "route" else "token"
+            await queue.put((kind, chunk))
 
         async def runner() -> None:
             try:
@@ -281,15 +368,12 @@ def _stream_request(
                     request=request,
                     user=user,
                     token_sink=token_sink,
-                    route_sink=route_sink,
                 )
                 await queue.put(("done", response))
             except Exception as exc:
                 await queue.put(("error", exc))
 
         task = asyncio.create_task(runner())
-        # Send visible content immediately; a role-only chunk is often rendered
-        # as an empty loading indicator by OpenAI-compatible chat clients.
         yield _chunk_payload(
             completion_id=completion_id,
             model=payload.model,
@@ -305,24 +389,30 @@ def _stream_request(
                 except TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
+
                 if kind == "route":
-                    yield _chunk_payload(
-                        completion_id=completion_id,
-                        model=payload.model,
-                        created=created,
-                        content=str(value),
-                    )
+                    chunk: LLMStreamChunk = value
+                    if chunk.content:
+                        yield _chunk_payload(
+                            completion_id=completion_id,
+                            model=payload.model,
+                            created=created,
+                            content=chunk.content,
+                        )
                     continue
 
                 if kind == "token":
-                    chunk: LLMStreamChunk = value
-                    if not served_model_seen:
+                    chunk = value
+                    if chunk.content and not served_model_seen:
                         served_model_seen = True
                         yield _chunk_payload(
                             completion_id=completion_id,
                             model=payload.model,
                             created=created,
-                            content=f"> **Served model:** `{chunk.served_model}`\n\n",
+                            content=(
+                                f"> **Served model:** `{chunk.requested_alias}` "
+                                f"(`{chunk.served_model}`)\n\n"
+                            ),
                         )
                     if chunk.content:
                         answer_token_seen = True
@@ -356,18 +446,8 @@ def _stream_request(
                         completion_id=completion_id,
                         model=payload.model,
                         created=created,
-                        content=_display_answer(response),
+                        content=response.answer,
                     )
-                else:
-                    notice = _approval_notice(response)
-                    if notice:
-                        yield _chunk_payload(
-                            completion_id=completion_id,
-                            model=payload.model,
-                            created=created,
-                            content=notice,
-                        )
-
                 yield _chunk_payload(
                     completion_id=completion_id,
                     model=payload.model,
@@ -402,7 +482,7 @@ async def list_models(_: None = Depends(verify_openai_backend_key)) -> dict[str,
                 "id": model_id,
                 "object": "model",
                 "created": created,
-                "owned_by": "saegyeol-lab",
+                "owned_by": "infonet",
                 "name": description,
             }
             for model_id, description in MODEL_DESCRIPTIONS.items()
@@ -426,12 +506,10 @@ async def chat_completions(
         )
 
     response = await _execute_request(payload=payload, request=request, user=user)
-    content = _display_answer(response)
     return JSONResponse(
         _completion_payload(
             completion_id=completion_id,
             model=payload.model,
-            content=content,
             response=response,
         )
     )

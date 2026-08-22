@@ -1,82 +1,63 @@
-# Architecture
+# Infonet AI Router Architecture
+
+## Control plane
+
+`backend/app/runtime.py` compiles one parent graph from `backend/app/workflows/parent.py`. The parent graph owns route selection and policy validation and mounts six independently compiled workflow subgraphs as nodes.
 
 ```text
 Open WebUI
-  accounts / chat / workflow selector
-          │ OpenAI-compatible API
-          ▼
-FastAPI control plane
-  signed user identity / RBAC / collection permissions
-          │
-          ├─ lab-auto
-          │     ▼
-          │  local-router via LiteLLM
-          │     ├─ answer -> final response
-          │     └─ delegate -> workflow + tier
-          │
-          ├─ direct LangGraph
-          ├─ domain RAG LangGraph
-          ├─ paper LangGraph
-          ├─ grant LangGraph
-          └─ website LangGraph + interrupt/approval
-                    │
-          ┌─────────┴───────────┐
-          ▼                     ▼
-PostgreSQL + pgvector       MinIO/S3
-state / ACL / chunks        original files
-          │
-          ▼
-LiteLLM Proxy — exclusive model gateway
-   ├─ local-router -> vLLM or Ollama
-   ├─ local-fast   -> vLLM or Ollama
-   ├─ cloud-small  -> configured provider deployment(s)
-   ├─ cloud-large  -> configured provider deployment(s)
-   └─ embedding    -> configured embedding deployment(s)
+  → FastAPI OpenAI adapter
+  → Parent LangGraph
+      route
+      validate_route
+      announce_route
+      conditional workflow subgraph
+      finalize
+  → LiteLLM aliases
+  → Ollama/vLLM/cloud deployments
 ```
 
-## Routing contract
+### Parent graph state
 
-`lab-auto` performs one local call through the `local-router` LiteLLM alias. The structured result is one of:
+The parent graph receives request identity, user roles, selected quality, PDF attachment context, collection IDs, and a stable conversation message history maintained by the PostgreSQL LangGraph checkpointer. It records the selected workflow, logical model tier, route confidence, fallback status, sources, answer, and model-call events.
+
+### Subgraph contracts
+
+- `chat`: one direct answer node.
+- `pdf`: retrieve PDF evidence, then answer; missing evidence terminates without a model call.
+- `regulations`: retrieve only from the reserved `gist-regulations` collection, then answer.
+- `paper`: one placeholder draft node.
+- `grant`: one placeholder draft node.
+- `website`: one non-mutating placeholder proposal node.
+
+The placeholder workflows intentionally do not claim project management, multi-agent collaboration, repository mutation, approval, or publication.
+
+## Routing policy
+
+The local router model classifies semantic workflow and difficulty (`simple`, `standard`, or
+`advanced`). Python maps difficulty to the logical LiteLLM tier and enforces:
+
+- allowed workflow IDs and roles;
+- PDF/regulations document requirements;
+- a `cloud-small` floor for automatically selected specialist workflows;
+- a minimum confidence for accepting `chat/simple` as `local-fast`;
+- visible fallback behavior;
+- explicit `fast` and `high` quality overrides.
+
+This removes the prior failure mode where malformed or disallowed router output silently became `direct + local-fast`.
+
+## LiteLLM boundary
+
+Application code selects a logical alias:
 
 ```text
-answer:
-  final local answer
-
-delegate:
-  workflow
-  recommended model tier
-  whether document retrieval is required
+local-router | local-fast | cloud-small | cloud-large | embedding
 ```
 
-A locally answered request stops immediately. A delegated general request runs exactly one downstream direct-inference node. Specialist workflows may have multiple stages because that is the requested workflow, not a routing artifact.
+LiteLLM handles the concrete deployment, provider translation, keys, budgets, rate limits, load balancing, retries/fallbacks, and usage accounting. No workflow imports provider-specific model clients.
 
-No query-length or keyword complexity score is used. Model selection is based on the local semantic decision, explicit user quality selection, and fixed stage policy. LiteLLM chooses deployments within each alias.
+## Document architecture
 
-## Deterministic controls
+Original files are stored in MinIO/S3. Parsed chunks and embeddings are stored in PostgreSQL/pgvector. Hybrid retrieval fuses vector and PostgreSQL full-text ranks.
 
-The following are never delegated to an LLM:
-
-- explicit workflow selection;
-- workflow role authorization;
-- collection visibility and SQL permission filtering;
-- LiteLLM virtual-key budgets and model access;
-- repository path allow-listing;
-- human approval before a GitHub pull request;
-- rejection of malformed router output.
-
-## RAG
-
-Documents are stored in object storage and indexed in PostgreSQL. Retrieval fuses pgvector cosine ranking and PostgreSQL full-text ranking with reciprocal-rank fusion. Access rules are applied in SQL before candidates are ranked.
-
-When `use_documents=true` and no collection IDs are specified, RAG searches all collections accessible to the current user. This supports `lab-rag` and automatic document routing from Open WebUI without exposing inaccessible collections.
-
-## Open WebUI integration
-
-The backend exposes:
-
-```text
-GET  /v1/models
-POST /v1/chat/completions
-```
-
-The model IDs represent workflows, not provider models. Open WebUI forwards a signed identity JWT and chat ID. The chat ID is converted to a stable conversation UUID, while LangGraph checkpoints remain run-scoped to avoid state collisions between different workflow graphs.
+The GIST regulations corpus is a reserved system collection. The old local FAISS index is not a runtime dependency and is not deserialized.

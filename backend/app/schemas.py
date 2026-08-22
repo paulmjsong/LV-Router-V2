@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
-from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -10,8 +9,9 @@ from pydantic import BaseModel, Field, field_validator
 
 class WorkflowId(StrEnum):
     AUTO = "auto"
-    DIRECT = "direct"
-    DOMAIN_RAG = "domain_rag"
+    CHAT = "chat"
+    PDF = "pdf"
+    REGULATIONS = "regulations"
     PAPER = "paper"
     GRANT = "grant"
     WEBSITE = "website"
@@ -40,7 +40,7 @@ class WorkflowInfo(BaseModel):
     name: str
     description: str
     allowed_roles: list[str]
-    mutating: bool = False
+    placeholder: bool = False
 
 
 class ChatRequest(BaseModel):
@@ -50,6 +50,8 @@ class ChatRequest(BaseModel):
     quality: Quality = Quality.BALANCED
     collection_ids: list[UUID] = Field(default_factory=list, max_length=20)
     use_documents: bool | None = None
+    attachment_context: str = Field(default="", max_length=100000)
+    has_pdf_attachment: bool = False
 
     @field_validator("query")
     @classmethod
@@ -69,27 +71,17 @@ class SourceCitation(BaseModel):
     excerpt: str
 
 
-class PendingAction(BaseModel):
-    action_type: str
-    summary: str
-    payload: dict[str, Any] = Field(default_factory=dict)
-
-
 class ChatResponse(BaseModel):
     run_id: UUID
     conversation_id: UUID
     workflow: WorkflowId
     route_reason: str
+    route_fallback: bool = False
+    route_difficulty: str = ""
     answer: str
     model_tiers: list[str] = Field(default_factory=list)
     sources: list[SourceCitation] = Field(default_factory=list)
     status: str = "completed"
-    pending_action: PendingAction | None = None
-
-
-class RunDecisionRequest(BaseModel):
-    decision: str = Field(pattern="^(approve|reject)$")
-    feedback: str | None = Field(default=None, max_length=4000)
 
 
 class CollectionCreate(BaseModel):
@@ -105,6 +97,7 @@ class CollectionInfo(BaseModel):
     visibility: Visibility
     owner_user_id: str
     team_id: str | None
+    system_key: str | None = None
     created_at: datetime
 
 
