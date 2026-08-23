@@ -1,125 +1,124 @@
 # Infonet AI Router
 
-A multi-user research-lab AI platform with:
+A multi-user research-lab AI service built around **Open WebUI + FastAPI + one parent LangGraph + LiteLLM**.
 
-- **Open WebUI** for accounts and chat.
-- **One parent LangGraph** for route selection, policy validation, and subgraph dispatch.
-- **Isolated workflow subgraphs** for chat, PDF Q&A, GIST regulations, and three placeholders.
-- **LiteLLM Proxy** as the only LLM and embedding gateway.
-- **Ollama or vLLM** for local inference.
-- **PostgreSQL + pgvector** for checkpoints, documents, and hybrid retrieval.
-- **MinIO/S3** for original uploaded files.
+## Active modes
 
-## Workflow IDs
-
-Open WebUI exposes one automatic selector plus six workflow selections:
-
-| ID | Purpose |
+| UI mode | What it does |
 |---|---|
-| `auto` | Local semantic router selects a workflow and logical model tier. |
-| `chat` | General direct inference. |
-| `pdf` | Answer from Open WebUI PDF File Context or indexed PDF collections. |
-| `regulations` | Answer only from the reserved GIST regulations corpus. |
-| `paper` | Deliberately minimal paper-assistant placeholder. |
-| `grant` | Deliberately minimal grant-assistant placeholder. |
-| `website` | Deliberately non-mutating website-assistant placeholder. |
+| `auto` | Local router selects an active workflow and difficulty. **Default.** |
+| `direct` | One general-purpose inference path. |
+| `gist-regulations` | Straightforward RAG over the supplied GIST/Jireumgil FAISS vectorstore. |
+| `research-paper` | Basic multi-agent drafting workflow. |
 
-The paper, grant, and website entries are not represented as finished multi-agent systems. Each currently contains one clearly labeled placeholder model stage.
+`grant` and `website` are intentionally **not selectable**. Open WebUI shows them as grey “coming soon” status in a non-dismissible banner until those workflows are designed.
 
-## Graph structure
+User file uploads are disabled in this version. The backend also rejects file-bearing requests.
+
+## Architecture
 
 ```text
+Open WebUI
+   |
+   v
+FastAPI OpenAI-compatible adapter
+   |
+   v
 Parent LangGraph
-  START
-    → route
-    → validate_route
-    → announce_route
-    → conditional dispatch
-        ├─ chat subgraph
-        ├─ pdf subgraph
-        ├─ regulations subgraph
-        ├─ paper placeholder subgraph
-        ├─ grant placeholder subgraph
-        └─ website placeholder subgraph
-    → finalize
-    → END
+   route -> validate -> announce -> conditional subgraph -> finalize
+                     |         |                    |
+                     |         |                    +-- Research Paper multi-agent
+                     |         +-- GIST Regulations RAG
+                     +-- Direct
+   |
+   v
+LiteLLM aliases
+   local-router | local-fast | cloud-small | cloud-large | embedding
+   |
+   +--> Ollama / vLLM / cloud providers
 ```
 
-Routing, model-tier validation, and the selected workflow now live in the same LangGraph trace and PostgreSQL checkpoint thread. The stable thread is derived from the user and Open WebUI conversation ID. This replaces the previous design that selected one of several independent graphs in `WorkflowRuntime`.
+The parent graph owns workflow selection and mounts three isolated compiled subgraphs. LiteLLM is still the only model/embedding gateway.
 
-## Model-tier policy
+## Research Paper Drafting workflow
 
-The local router emits a compact semantic classification:
+This is intentionally a **basic** multi-agent system, not a finished autonomous paper platform:
+
+```text
+orchestrator
+   |   | +--> content subagent ----   +----> structure subagent ---+--> drafter --> validator --> finalizer
+```
+
+- **Orchestrator**: converts the request into a small structured plan.
+- **Content subagent**: identifies substantive claims, technical content, and missing evidence.
+- **Structure subagent**: proposes academic organization, argument order, and transitions.
+- **Drafter**: synthesizes the plan and both specialist outputs.
+- **Validator**: checks requested coverage, unsupported claims, fabricated results/citations, and major logical/clarity issues.
+- **Finalizer**: revises according to validation and returns the final user-facing draft.
+
+The agents are separate LangGraph nodes with separate model calls. They do not pretend to search literature or validate experiments unless that evidence is actually provided in conversation context.
+
+## GIST Regulations workflow
+
+This version uses the supplied legacy vectorstore directly:
+
+```text
+index.faiss + index.pkl
+      |
+query -> LiteLLM embedding alias
+      |
+FAISS top-k search
+      |
+retrieved regulation passages
+      |
+answer model with [SOURCE n] citations
+```
+
+The supplied index contains 266 mapped chunks and uses a **1536-dimensional embedding space**. It was created by the original Jireumgil setup using `text-embedding-3-small`, so the query embedding must stay compatible:
+
+```dotenv
+EMBEDDING_MODEL=openai/text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+GIST_REGULATIONS_VECTOR_DIMENSIONS=1536
+```
+
+Set `EMBEDDING_API_KEY` (or configure the same embedding deployment in LiteLLM). If you later change embedding models, rebuild the FAISS index rather than querying the old index with incompatible vectors.
+
+For safety, the backend does **not** call `FAISS.load_local(...allow_dangerous_deserialization=True)`. It loads the FAISS binary normally and uses a restricted unpickler that allows only the two LangChain classes present in the supplied `index.pkl`.
+
+## Auto routing and the old local-fast collapse
+
+The local router returns only:
 
 ```json
-{
-  "workflow": "chat",
-  "difficulty": "simple",
-  "confidence": 0.92
-}
+{"workflow":"direct","difficulty":"standard","confidence":0.91}
 ```
 
-Python then maps `simple`, `standard`, and `advanced` to `local-fast`, `cloud-small`,
-and `cloud-large`. This is deliberately easier for the small router model than asking it to reason
-about provider aliases directly. The application validates the decision before dispatch:
-
-- malformed, disallowed, or low-confidence routing uses a **visible `cloud-small` fallback**;
-- automatic/BALANCED specialist routing has a `cloud-small` floor;
-- balanced `local-fast` is accepted only for `chat/simple` above `LOCAL_FAST_MIN_CONFIDENCE`;
-- an explicit `fast` or `high` quality override selects `local-fast` or `cloud-large`.
-
-The UI displays the selected workflow, difficulty, confidence, fallback status, logical alias, and served model. LiteLLM maps the logical alias to a concrete deployment and enforces provider policy, keys, budgets, limits, retries, and accounting.
-
-## RAG design
-
-### PDF Q&A
-
-Two input modes are supported:
-
-1. **Open WebUI File Context**: attach a PDF and keep File Context enabled. Open WebUI extracts/retrieves file context and injects it into the OpenAI-compatible request; the backend separates that evidence from the user's question.
-2. **Indexed PDF collection**: upload PDFs through `/api/documents/upload`, pass the collection IDs in request metadata, and use `pdf` or `auto`. Reserved system collections are excluded from this path.
-
-Indexed PDF retrieval is restricted to PDF MIME types and uses:
+Difficulty maps deterministically:
 
 ```text
-query embedding through LiteLLM
-+ pgvector cosine retrieval
-+ PostgreSQL full-text retrieval
-+ reciprocal-rank fusion
+simple   -> local-fast
+standard -> cloud-small
+advanced -> cloud-large
 ```
 
-### GIST regulations
+Additional policy:
 
-At startup, the backend creates a reserved public collection identified by:
-
-```text
-gist-regulations
-```
-
-Only administrators can modify it. The `regulations` subgraph retrieves exclusively from this collection, so it cannot silently mix ordinary lab files into an institutional-policy answer.
-
-The old Jireumgil FAISS directory is **not loaded**. That serialized index is tied to its original embedding setup, is local-process state, and previously required dangerous deserialization. Re-index the original regulation source PDFs/DOCX/TXT files into pgvector instead. See [docs/JIREUMGIL_MIGRATION.md](docs/JIREUMGIL_MIGRATION.md).
+- `gist-regulations` and `research-paper` can never resolve to `local-fast` in balanced auto mode.
+- `direct/simple` is accepted as `local-fast` only above `LOCAL_FAST_MIN_CONFIDENCE`.
+- malformed, disallowed, or low-confidence router output uses a **visible cloud-small fallback**, never silent local-fast.
+- the route line displayed before an answer includes workflow, difficulty, confidence, and fallback status.
 
 ## Configure
 
-```bash
-cp .env.example .env
+```powershell
+Copy-Item .env.example .env
 python scripts/generate_secrets.py
 ```
 
-Copy the generated values into `.env`. At minimum configure:
+Copy generated secrets into `.env`. For the supplied GIST FAISS index, configure the compatible embedding endpoint/key.
 
-```dotenv
-LITELLM_MASTER_KEY=sk-...
-LITELLM_SALT_KEY=sk-...
-BACKEND_LITELLM_KEY=sk-...
-OPENWEBUI_BACKEND_KEY=sk-...
-OPENWEBUI_IDENTITY_JWT_SECRET=...
-OPENWEBUI_SECRET_KEY=...
-LAB_ADMIN_API_KEY=sk-...
-```
-
-For local CPU development:
+For Windows CPU development:
 
 ```dotenv
 LOCAL_BACKEND=ollama
@@ -127,27 +126,11 @@ OLLAMA_ROUTER_MODEL_ID=qwen3:0.6b
 OLLAMA_MODEL_ID=qwen3:4b-instruct-2507-q4_K_M
 ```
 
-For a lab GPU server:
-
-```dotenv
-LOCAL_BACKEND=vllm
-LOCAL_MODEL_ID=Qwen/Qwen3-8B
-```
-
-Cloud and embedding aliases require their configured provider credentials. Existing installations may keep their old PostgreSQL/MinIO usernames and database names; those are storage credentials, not product branding.
-
 ## Start
 
-### Windows or CPU development
-
 ```powershell
-docker compose --profile ollama up -d --build
-```
-
-### NVIDIA GPU / vLLM
-
-```bash
-docker compose --profile gpu up -d --build
+docker compose --profile ollama down --remove-orphans
+docker compose --profile ollama up -d --build --force-recreate
 ```
 
 Open:
@@ -156,74 +139,37 @@ Open:
 http://localhost:3000
 ```
 
-Open WebUI defaults to `auto`. Notes, Calendar, Automations, and Open WebUI's own
-sub-agent feature are disabled so they cannot add unrelated UI surfaces or hidden model calls to this
-platform. Workspace administration should remain restricted to administrators.
-
-### Branding boundary
-
-The configured product name is `Infonet AI Router`. Open WebUI may still identify its upstream
-software on the unauthenticated login surface. This repository does not disguise or patch third-party
-branding; complete white-labeling requires a permitted Open WebUI fork/license or a custom frontend.
+Open WebUI defaults to `auto`.
 
 Useful checks:
 
-```bash
+```powershell
 docker compose ps
 docker compose logs -f ollama-init ollama litellm backend open-webui
-curl http://127.0.0.1:8000/api/health
-curl http://127.0.0.1:4000/health/readiness
+curl.exe http://localhost:8000/api/health
+curl.exe http://localhost:4000/health/readiness
 ```
 
-## Index PDF documents
+## Validate
 
-Create a collection:
-
-```bash
-docker compose exec backend python -m app.admin_cli create-collection \
-  --name "Project PDFs" \
-  --description "Shared PDF collection" \
-  --visibility team
+```powershell
+python -X utf8 scripts/validate_static.py
+python -m compileall -q backend/app backend/tests infra/litellm scripts
 ```
 
-Upload PDF files using the returned collection ID:
+Full runtime tests require installing the backend development dependencies:
 
-```bash
-docker compose exec backend python -m app.admin_cli upload \
-  --collection-id <collection-uuid> \
-  /imports/paper.pdf
-```
-
-## Index GIST regulations
-
-Place the original regulation source files under `imports/gist-regulations/`, then run:
-
-```bash
-docker compose exec backend python -m app.admin_cli upload-regulations \
-  /imports/gist-regulations
-```
-
-The CLI scans supported files in the directory recursively.
-
-Do not copy `index.faiss` or `index.pkl` into the new service. The source documents must be embedded again through the configured LiteLLM `embedding` alias.
-
-## Upgrade notes from the previous build
-
-- Existing PostgreSQL and MinIO usernames may remain unchanged. They are storage credentials, not UI branding.
-- Old prefixed Open WebUI model IDs are removed. Recreate the Open WebUI container, start a new chat, and select `auto`.
-- Existing `.env` secrets must be preserved. Add the new routing/GIST variables rather than replacing the file.
-- The previous one-file website approval flow is intentionally removed while `website` is a placeholder. Old interrupted website runs cannot be resumed by this version.
-- The old Jireumgil FAISS files are not loaded; re-index the reviewed source documents as described below.
-
-## Validation
-
-```bash
-python -m compileall backend/app backend/tests infra/litellm scripts
-python scripts/validate_static.py
-
+```powershell
 cd backend
-python -m pip install -e '.[dev]'
+python -m pip install -e ".[dev]"
 pytest
 ```
 
-A complete integration test still requires Docker, PostgreSQL, MinIO, LiteLLM, and a functioning local/cloud model configuration.
+## Deliberate omissions in this version
+
+- no PDF/user-file workflow;
+- no document upload/indexing UI;
+- no generic pgvector RAG workflow;
+- no active Grant workflow;
+- no active Website workflow;
+- no claim that the research-paper workflow performs autonomous literature search, citation verification, or experiment validation.

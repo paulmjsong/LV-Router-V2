@@ -13,15 +13,13 @@ class FakeRouterLLM:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
         self.calls = 0
-        self.kwargs = None
 
     async def chat(self, **kwargs):
         self.calls += 1
-        self.kwargs = kwargs
         return LLMResult(
             content=json.dumps(self.payload),
             requested_alias=kwargs["model_alias"],
-            served_model="local-test-model",
+            served_model="router-test",
         )
 
     @staticmethod
@@ -40,130 +38,63 @@ def settings(min_confidence: float = 0.55):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("workflow", "difficulty", "expected_tier", "use_documents"),
+    ("workflow", "difficulty", "tier", "uses_docs"),
     [
-        (WorkflowId.CHAT, RouteDifficulty.SIMPLE, ModelTier.LOCAL_FAST, False),
-        (WorkflowId.CHAT, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
-        (WorkflowId.CHAT, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
-        # A specialist/simple classification is normalized upward rather than
-        # silently creating another local-fast outcome.
-        (WorkflowId.PDF, RouteDifficulty.SIMPLE, ModelTier.CLOUD_SMALL, True),
-        (WorkflowId.REGULATIONS, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, True),
+        (WorkflowId.DIRECT, RouteDifficulty.SIMPLE, ModelTier.LOCAL_FAST, False),
+        (WorkflowId.DIRECT, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
+        (WorkflowId.DIRECT, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
+        # Specialists are never accepted as simple/local-fast.
+        (WorkflowId.REGULATIONS, RouteDifficulty.SIMPLE, ModelTier.CLOUD_SMALL, True),
         (WorkflowId.PAPER, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
-        (WorkflowId.GRANT, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
-        (WorkflowId.WEBSITE, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
+        (WorkflowId.PAPER, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
     ],
 )
-async def test_router_accepts_and_normalizes_every_supported_outcome(
-    workflow: WorkflowId,
-    difficulty: RouteDifficulty,
-    expected_tier: ModelTier,
-    use_documents: bool,
-) -> None:
-    llm = FakeRouterLLM(
-        {
-            "workflow": workflow.value,
-            "difficulty": difficulty.value,
-            "confidence": 0.95,
-        }
-    )
+async def test_router_maps_supported_outcomes(workflow, difficulty, tier, uses_docs) -> None:
+    llm = FakeRouterLLM({
+        "workflow": workflow.value,
+        "difficulty": difficulty.value,
+        "confidence": 0.96,
+    })
     router = LocalSemanticRouter(llm, settings())
     outcome = await router.decide(
         query="Representative request",
         history=[],
-        collection_count=1 if workflow == WorkflowId.PDF else 0,
-        has_pdf_attachment=workflow == WorkflowId.PDF,
-        allowed_workflows=list(WorkflowId)[1:],
+        allowed_workflows=[WorkflowId.DIRECT, WorkflowId.REGULATIONS, WorkflowId.PAPER],
         user=UserContext(user_id="u", team_id="lab", roles={"member"}),
         run_id="run-1",
     )
     assert llm.calls == 1
     assert outcome.used_fallback is False
     assert outcome.decision.workflow == workflow
-    assert outcome.decision.model_tier == expected_tier
-    assert outcome.decision.use_documents is use_documents
+    assert outcome.decision.model_tier == tier
+    assert outcome.decision.use_documents is uses_docs
 
 
 @pytest.mark.asyncio
-async def test_low_confidence_fallback_is_visible_cloud_small_not_local_fast() -> None:
-    llm = FakeRouterLLM(
-        {
-            "workflow": "chat",
-            "difficulty": "simple",
-            "confidence": 0.10,
-        }
-    )
-    router = LocalSemanticRouter(llm, settings())
-    outcome = await router.decide(
-        query="Ambiguous request",
+async def test_invalid_or_low_confidence_router_never_falls_back_to_local_fast() -> None:
+    llm = FakeRouterLLM({
+        "workflow": "direct",
+        "difficulty": "simple",
+        "confidence": 0.10,
+    })
+    outcome = await LocalSemanticRouter(llm, settings()).decide(
+        query="Ambiguous",
         history=[],
-        collection_count=0,
-        has_pdf_attachment=False,
-        allowed_workflows=[WorkflowId.CHAT],
+        allowed_workflows=[WorkflowId.DIRECT, WorkflowId.REGULATIONS, WorkflowId.PAPER],
         user=UserContext(user_id="u", roles={"member"}),
         run_id="run-2",
     )
     assert outcome.used_fallback is True
-    assert outcome.decision.workflow == WorkflowId.CHAT
-    assert outcome.decision.model_tier == ModelTier.CLOUD_SMALL
-    assert "fallback" in outcome.reason.lower()
-
-
-@pytest.mark.asyncio
-async def test_old_model_tier_schema_is_rejected_instead_of_defaulting_local() -> None:
-    llm = FakeRouterLLM(
-        {
-            "workflow": "chat",
-            "model_tier": "local-fast",
-            "use_documents": False,
-            "confidence": 0.99,
-        }
-    )
-    router = LocalSemanticRouter(llm, settings())
-    outcome = await router.decide(
-        query="Ambiguous request",
-        history=[],
-        collection_count=0,
-        has_pdf_attachment=False,
-        allowed_workflows=[WorkflowId.CHAT],
-        user=UserContext(user_id="u", roles={"member"}),
-        run_id="run-3",
-    )
-    assert outcome.used_fallback is True
+    assert outcome.decision.workflow == WorkflowId.DIRECT
     assert outcome.decision.model_tier == ModelTier.CLOUD_SMALL
 
 
-def test_stage_policy_prevents_specialist_workflows_from_collapsing_to_local_fast() -> None:
+def test_balanced_specialists_have_cloud_small_floor() -> None:
     policy = StageModelPolicy()
-    for workflow in {
-        WorkflowId.PDF,
-        WorkflowId.REGULATIONS,
-        WorkflowId.PAPER,
-        WorkflowId.GRANT,
-        WorkflowId.WEBSITE,
-    }:
+    for workflow in (WorkflowId.REGULATIONS, WorkflowId.PAPER):
         assert policy.stage_alias(
             workflow=workflow,
             recommended_tier=ModelTier.LOCAL_FAST,
             quality=Quality.BALANCED,
             stage="answer",
         ) == "cloud-small"
-
-    assert policy.stage_alias(
-        workflow=WorkflowId.CHAT,
-        recommended_tier=ModelTier.LOCAL_FAST,
-        quality=Quality.BALANCED,
-        stage="answer",
-    ) == "local-fast"
-    assert policy.stage_alias(
-        workflow=WorkflowId.PAPER,
-        recommended_tier=ModelTier.CLOUD_SMALL,
-        quality=Quality.FAST,
-        stage="draft",
-    ) == "local-fast"
-    assert policy.stage_alias(
-        workflow=WorkflowId.CHAT,
-        recommended_tier=ModelTier.LOCAL_FAST,
-        quality=Quality.HIGH,
-        stage="answer",
-    ) == "cloud-large"

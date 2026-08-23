@@ -1,33 +1,14 @@
-# Migrating the Jireumgil GIST Regulations Corpus
+# Jireumgil / GIST Regulations Vectorstore
 
-## Decision
+This release **does not migrate** the original Jireumgil FAISS store to pgvector. It uses the supplied pair directly:
 
-The legacy FAISS vector store is not used by Infonet AI Router.
-
-Reasons:
-
-1. It was local process state and unsuitable for a multi-user service.
-2. Its vectors depend on the original embedding model and dimensions.
-3. Its metadata was loaded through pickle-backed dangerous deserialization.
-4. It had no central access control, document status, audit metadata, or shared retrieval layer.
-5. Maintaining two retrieval stacks would make behavior and evaluation inconsistent.
-
-## Required migration
-
-Use the original regulation source files, not `index.faiss` or `index.pkl`.
-
-1. Copy PDFs, DOCX, TXT, Markdown, HTML, or JSON files into `imports/gist-regulations/`.
-2. Configure a working LiteLLM `embedding` alias and matching `EMBEDDING_DIMENSIONS`.
-3. Start the stack.
-4. Run:
-
-```bash
-docker compose exec backend python -m app.admin_cli upload-regulations \
-  /imports/gist-regulations
+```text
+jireumgil_index/index.faiss
+jireumgil_index/index.pkl
 ```
 
-The CLI scans supported files recursively. The backend parses, chunks, embeds, and writes the documents into the reserved collection whose `system_key` is `gist-regulations`.
+The index is treated as immutable application data. Query embeddings must remain compatible with the embedding model used to build the index. The supplied store is 1536-dimensional and the original code used `text-embedding-3-small`.
 
-## If only the FAISS files remain
+If the GIST regulation corpus changes substantially or you change embedding models, rebuild the vectorstore from the source regulation documents and replace both files together.
 
-Do not enable `allow_dangerous_deserialization` in the production service. Recover the original source documents or perform a separate offline, explicitly trusted extraction/migration outside this runtime, inspect the recovered text, and then ingest the reviewed files through the normal endpoint.
+The pickle loader is restricted to the LangChain `InMemoryDocstore` and `Document` classes present in this supplied file; unrestricted deserialization is not enabled.

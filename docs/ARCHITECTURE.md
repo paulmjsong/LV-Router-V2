@@ -1,63 +1,71 @@
-# Infonet AI Router Architecture
+# Infonet AI Router v0.4 Architecture
 
-## Control plane
+## Parent LangGraph
 
-`backend/app/runtime.py` compiles one parent graph from `backend/app/workflows/parent.py`. The parent graph owns route selection and policy validation and mounts six independently compiled workflow subgraphs as nodes.
-
-```text
-Open WebUI
-  → FastAPI OpenAI adapter
-  → Parent LangGraph
-      route
-      validate_route
-      announce_route
-      conditional workflow subgraph
-      finalize
-  → LiteLLM aliases
-  → Ollama/vLLM/cloud deployments
-```
-
-### Parent graph state
-
-The parent graph receives request identity, user roles, selected quality, PDF attachment context, collection IDs, and a stable conversation message history maintained by the PostgreSQL LangGraph checkpointer. It records the selected workflow, logical model tier, route confidence, fallback status, sources, answer, and model-call events.
-
-### Subgraph contracts
-
-- `chat`: one direct answer node.
-- `pdf`: retrieve PDF evidence, then answer; missing evidence terminates without a model call.
-- `regulations`: retrieve only from the reserved `gist-regulations` collection, then answer.
-- `paper`: one placeholder draft node.
-- `grant`: one placeholder draft node.
-- `website`: one non-mutating placeholder proposal node.
-
-The placeholder workflows intentionally do not claim project management, multi-agent collaboration, repository mutation, approval, or publication.
-
-## Routing policy
-
-The local router model classifies semantic workflow and difficulty (`simple`, `standard`, or
-`advanced`). Python maps difficulty to the logical LiteLLM tier and enforces:
-
-- allowed workflow IDs and roles;
-- PDF/regulations document requirements;
-- a `cloud-small` floor for automatically selected specialist workflows;
-- a minimum confidence for accepting `chat/simple` as `local-fast`;
-- visible fallback behavior;
-- explicit `fast` and `high` quality overrides.
-
-This removes the prior failure mode where malformed or disallowed router output silently became `direct + local-fast`.
-
-## LiteLLM boundary
-
-Application code selects a logical alias:
+The control plane is one compiled parent graph with isolated workflow subgraphs:
 
 ```text
-local-router | local-fast | cloud-small | cloud-large | embedding
+START
+  -> route
+  -> validate_route
+  -> announce_route
+  -> conditional dispatch
+       |- direct
+       |- gist-regulations
+       `- research-paper
+  -> finalize
+  -> END
 ```
 
-LiteLLM handles the concrete deployment, provider translation, keys, budgets, rate limits, load balancing, retries/fallbacks, and usage accounting. No workflow imports provider-specific model clients.
+`grant` and `website` exist only as disabled workflow metadata so the UI can communicate “coming soon”; they are not graph nodes and the local router cannot select them.
 
-## Document architecture
+## Direct subgraph
 
-Original files are stored in MinIO/S3. Parsed chunks and embeddings are stored in PostgreSQL/pgvector. Hybrid retrieval fuses vector and PostgreSQL full-text ranks.
+`START -> answer -> END`. One LLM call through LiteLLM.
 
-The GIST regulations corpus is a reserved system collection. The old local FAISS index is not a runtime dependency and is not deserialized.
+## GIST Regulations subgraph
+
+`START -> retrieve -> answer -> END`.
+
+`retrieve`:
+1. embeds the query through LiteLLM alias `embedding`;
+2. performs top-k FAISS search over `jireumgil_index/index.faiss`;
+3. resolves FAISS IDs through the supplied `index.pkl` docstore mapping;
+4. formats source snippets.
+
+`answer` calls the selected answer tier and must ground the response in those snippets.
+
+The supplied vectorstore is read-only. No user upload pipeline exists.
+
+## Research Paper Drafting subgraph
+
+```text
+START -> orchestrator
+             |             | +-> content_agent ---             `---> structure_agent --+-> draft -> validator -> final -> END
+```
+
+This is a minimal multi-agent composition:
+- orchestrator = planning agent;
+- content_agent and structure_agent = parallel specialist subagents;
+- draft = synthesis agent;
+- validator = independent validation agent;
+- final = correction/finalization agent.
+
+Each node is an independent LLM call and receives a stage-specific system prompt. It is deliberately not a literature-search or experiment-validation system yet.
+
+## Model routing
+
+The local routing model classifies workflow + difficulty. Application policy maps difficulty to LiteLLM aliases and enforces specialist floors. LiteLLM handles the concrete provider/deployment, credentials, budgets, rate limits, retries/fallbacks, and accounting.
+
+## UI modes
+
+Selectable provider models exposed to Open WebUI:
+
+```text
+auto
+direct
+gist-regulations
+research-paper
+```
+
+`DEFAULT_MODELS=auto`. File and web attachments are disabled for normal users, and the backend rejects requests carrying files. Grant/Website are rendered as grey “coming soon” status in an Open WebUI banner because provider-backed model lists do not have a reliable portable disabled-model state.

@@ -1,32 +1,19 @@
-# Validation Record
+# Validation
 
-Validated in this delivery environment:
+Static validation for v0.4 checks:
+- four selectable Open WebUI modes only;
+- Auto is the default mode;
+- Grant/Website are not selectable or routable;
+- user file/web uploads are disabled in the UI adapter;
+- one parent LangGraph mounts only Direct, GIST Regulations, and Research Paper subgraphs;
+- paper subgraph contains orchestrator, two specialist subagents, drafter, validator, and finalizer;
+- GIST Regulations uses the supplied FAISS pair and a restricted pickle loader;
+- no runtime import of the removed generic upload/RAG modules;
+- router fallbacks do not collapse to local-fast.
 
-- Python syntax compilation for backend, tests, LiteLLM helpers, and scripts: **PASS**
-- Parent graph/subgraph static invariants: **PASS**
-- Simple Open WebUI workflow IDs and Infonet branding audit: **PASS**
-- Legacy Gradio/provider-client/FAISS runtime audit: **PASS**
-- Docker Compose YAML parsing: **PASS**
-- Git whitespace/error check (`git diff --check`): **PASS**
-- GIST reserved collection and administrator ingestion path: **included and statically verified**
-- Obsolete website approval/resume interfaces after placeholder simplification: **removed and statically verified**
-- Router normalization/fallback/tier tests and local streaming-limit tests: **13 passed**
-- Parent-dispatch, Open WebUI PDF-context, and RAG-isolation tests: **included but not executed here**
+Run:
 
-Not executable in this environment:
-
-- Full Docker Compose startup: no Docker daemon is available.
-- Full pytest suite: LangGraph, LangChain Core, and OpenAI runtime dependencies are not installed and package download is unavailable in this environment.
-- Live calls to Ollama/vLLM, LiteLLM, cloud providers, MinIO, PostgreSQL, or Open WebUI.
-
-Run on the target machine:
-
-```bash
-python -m compileall backend/app backend/tests infra/litellm scripts
-python scripts/validate_static.py
-cd backend
-python -m pip install -e '.[dev]'
-pytest
+```powershell
+python -X utf8 scripts/validate_static.py
+python -m compileall -q backend/app backend/tests infra/litellm scripts
 ```
-
-Then run the Docker smoke checks described in `README.md`.

@@ -20,7 +20,6 @@ class Settings(BaseSettings):
     app_name: str = "Infonet AI Router"
     environment: Literal["development", "test", "production"] = "development"
     log_level: str = "INFO"
-
     database_url: str = "postgresql://infonet:infonet@postgres:5432/infonet"
 
     litellm_base_url: str = "http://litellm:4000"
@@ -36,6 +35,11 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=1536, ge=128, le=8192)
     llm_timeout_seconds: float = Field(default=240.0, ge=5, le=900)
     allow_direct_provider_url: bool = False
+
+    gist_regulations_index_dir: Path = Path("/app/jireumgil_index")
+    gist_regulations_top_k: int = Field(default=5, ge=1, le=20)
+    gist_regulations_vector_dimensions: int = Field(default=1536, ge=128, le=8192)
+    gist_regulations_context_chars: int = Field(default=16000, ge=2000, le=50000)
 
     auth_mode: Literal["dev", "oidc", "cloudflare_access", "openwebui"] = "dev"
     auth_token_header: str = "Cf-Access-Jwt-Assertion"
@@ -62,29 +66,6 @@ class Settings(BaseSettings):
     conversation_history_messages: int = Field(default=16, ge=2, le=100)
     conversation_history_chars: int = Field(default=24000, ge=2000, le=200000)
 
-    max_upload_mb: int = Field(default=30, ge=1, le=500)
-    chunk_size: int = Field(default=1400, ge=300, le=8000)
-    chunk_overlap: int = Field(default=200, ge=0, le=2000)
-    rag_top_k: int = Field(default=8, ge=1, le=30)
-    rag_context_chars: int = Field(default=18000, ge=2000, le=100000)
-    rag_query_chars: int = Field(default=8000, ge=500, le=30000)
-    pdf_attachment_context_chars: int = Field(default=30000, ge=2000, le=150000)
-
-    gist_regulations_system_key: str = "gist-regulations"
-    gist_regulations_collection_name: str = "GIST Regulations"
-    gist_regulations_collection_description: str = (
-        "Authoritative GIST regulations indexed for the Regulations workflow."
-    )
-
-    object_store: Literal["local", "s3"] = "local"
-    local_object_store_path: Path = Path("/data/documents")
-    s3_endpoint_url: str | None = None
-    s3_region: str = "us-east-1"
-    s3_bucket: str = "infonet-documents"
-    s3_access_key_id: str | None = None
-    s3_secret_access_key: str | None = None
-
-
     @field_validator("litellm_base_url")
     @classmethod
     def normalize_litellm_url(cls, value: str) -> str:
@@ -102,6 +83,11 @@ class Settings(BaseSettings):
                 or self.openwebui_identity_jwt_secret == "change-this-openwebui-identity-secret"
             ):
                 raise ValueError("OPENWEBUI_IDENTITY_JWT_SECRET must be changed in openwebui mode")
+        if self.gist_regulations_vector_dimensions != self.embedding_dimensions:
+            raise ValueError(
+                "The supplied GIST FAISS index was built with the configured embedding dimension; "
+                "GIST_REGULATIONS_VECTOR_DIMENSIONS must match EMBEDDING_DIMENSIONS"
+            )
         if self.environment == "production":
             if self.auth_mode == "dev":
                 raise ValueError("AUTH_MODE=dev is forbidden in production")

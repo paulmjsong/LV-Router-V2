@@ -18,7 +18,9 @@ def env_bool(name: str, default: bool = False) -> bool:
 
 
 def extra_json(name: str) -> dict[str, Any]:
-    raw = env(name, "{}")
+    raw = env(name, "")
+    if not raw:
+        return {}
     parsed = json.loads(raw)
     if not isinstance(parsed, dict):
         raise ValueError(f"{name} must contain a JSON object")

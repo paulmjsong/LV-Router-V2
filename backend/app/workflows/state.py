@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import operator
 from typing import Any, TypedDict
 
 from langchain_core.messages import AnyMessage
@@ -18,9 +19,6 @@ class CommonWorkflowState(TypedDict, total=False):
     requested_workflow: str
     allowed_workflows: list[str]
     quality: str
-    collection_ids: list[str]
-    attachment_context: str
-    has_pdf_attachment: bool
 
     workflow_id: str
     recommended_tier: str
@@ -33,20 +31,15 @@ class CommonWorkflowState(TypedDict, total=False):
 
     answer: str
     sources: list[dict[str, Any]]
-    call_events: list[dict[str, str]]
+    call_events: Annotated[list[dict[str, str]], operator.add]
 
 
 class ParentState(CommonWorkflowState, total=False):
-    """Control-plane state shared between the parent graph and subgraphs."""
+    """Control-plane state shared between the parent graph and active subgraphs."""
 
 
-class ChatState(CommonWorkflowState, total=False):
-    """State visible to the general-chat subgraph."""
-
-
-class PdfState(CommonWorkflowState, total=False):
-    context: str
-    retrieval_error: str
+class DirectState(CommonWorkflowState, total=False):
+    pass
 
 
 class RegulationsState(CommonWorkflowState, total=False):
@@ -54,5 +47,8 @@ class RegulationsState(CommonWorkflowState, total=False):
     retrieval_error: str
 
 
-class PlaceholderState(CommonWorkflowState, total=False):
-    draft: str
+class PaperState(CommonWorkflowState, total=False):
+    paper_plan: str
+    paper_agent_outputs: Annotated[list[dict[str, str]], operator.add]
+    paper_draft: str
+    paper_validation: str

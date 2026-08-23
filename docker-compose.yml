@@ -23,46 +23,6 @@ services:
     volumes:
       - redis-data:/data
 
-  minio:
-    image: minio/minio:latest
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-infonet}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
-    volumes:
-      - minio-data:/data
-    ports:
-      - "127.0.0.1:9000:9000"
-      - "127.0.0.1:9001:9001"
-
-  minio-init:
-    image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_started
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-infonet}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
-      S3_BUCKET: ${S3_BUCKET:-infonet-documents}
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        attempt=0
-        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" >/dev/null 2>&1; do
-          attempt=$$((attempt + 1))
-          if [ "$$attempt" -ge 60 ]; then
-            echo "ERROR: MinIO did not become ready after 60 attempts." >&2
-            exit 1
-          fi
-          echo "Waiting for MinIO... attempt $$attempt/60"
-          sleep 2
-        done
-        mc mb --ignore-existing "local/$${S3_BUCKET}"
-        echo "MinIO bucket is ready: $${S3_BUCKET}"
-    restart: "no"
 
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
@@ -85,7 +45,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: ${VLLM_GPU_COUNT:-1}
+              count: 1
               capabilities: [gpu]
     volumes:
       - huggingface-cache:/root/.cache/huggingface
@@ -163,7 +123,7 @@ services:
 
       LOCAL_BACKEND: ${LOCAL_BACKEND:-vllm}
       LOCAL_MODEL_ID: ${LOCAL_MODEL_ID:-Qwen/Qwen3-8B}
-      LOCAL_MODEL_EXTRA_JSON: ${LOCAL_MODEL_EXTRA_JSON:-{}}
+      LOCAL_MODEL_EXTRA_JSON: ${LOCAL_MODEL_EXTRA_JSON:-}
       VLLM_API_BASE: ${VLLM_API_BASE:-http://vllm:8000/v1}
       VLLM_API_KEY: ${VLLM_API_KEY:-local-vllm-key}
       OLLAMA_ROUTER_MODEL_ID: ${OLLAMA_ROUTER_MODEL_ID:-qwen3:0.6b}
@@ -177,15 +137,15 @@ services:
       CLOUD_SMALL_MODEL: ${CLOUD_SMALL_MODEL:-openai/gpt-5-mini}
       CLOUD_SMALL_API_KEY: ${CLOUD_SMALL_API_KEY:-}
       CLOUD_SMALL_API_BASE: ${CLOUD_SMALL_API_BASE:-}
-      CLOUD_SMALL_EXTRA_JSON: ${CLOUD_SMALL_EXTRA_JSON:-{}}
+      CLOUD_SMALL_EXTRA_JSON: ${CLOUD_SMALL_EXTRA_JSON:-}
       CLOUD_LARGE_MODEL: ${CLOUD_LARGE_MODEL:-openai/gpt-5}
       CLOUD_LARGE_API_KEY: ${CLOUD_LARGE_API_KEY:-}
       CLOUD_LARGE_API_BASE: ${CLOUD_LARGE_API_BASE:-}
-      CLOUD_LARGE_EXTRA_JSON: ${CLOUD_LARGE_EXTRA_JSON:-{}}
+      CLOUD_LARGE_EXTRA_JSON: ${CLOUD_LARGE_EXTRA_JSON:-}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-openai/text-embedding-3-small}
       EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
       EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-}
-      EMBEDDING_EXTRA_JSON: ${EMBEDDING_EXTRA_JSON:-{}}
+      EMBEDDING_EXTRA_JSON: ${EMBEDDING_EXTRA_JSON:-}
 
       LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
@@ -216,7 +176,7 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-infonet}:${POSTGRES_PASSWORD:-infonet}@postgres:5432/${POSTGRES_DB:-infonet}
       LITELLM_BASE_URL: http://litellm:4000
       LITELLM_DEFAULT_API_KEY: ${BACKEND_LITELLM_KEY:-sk-change-me}
-      LITELLM_KEYS_JSON: ${LITELLM_KEYS_JSON:-{}}
+      LITELLM_KEYS_JSON: ${LITELLM_KEYS_JSON:-}
       LOCAL_ROUTER_MODEL_ALIAS: local-router
       LOCAL_ROUTER_MAX_TOKENS: ${LOCAL_ROUTER_MAX_TOKENS:-64}
       LOCAL_ROUTER_MIN_CONFIDENCE: ${LOCAL_ROUTER_MIN_CONFIDENCE:-0.55}
@@ -226,15 +186,10 @@ services:
       EMBEDDING_MODEL_ALIAS: embedding
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
       LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-240}
-      CHUNK_SIZE: ${CHUNK_SIZE:-1400}
-      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-200}
-      RAG_TOP_K: ${RAG_TOP_K:-8}
-      RAG_CONTEXT_CHARS: ${RAG_CONTEXT_CHARS:-18000}
-      RAG_QUERY_CHARS: ${RAG_QUERY_CHARS:-8000}
-      PDF_ATTACHMENT_CONTEXT_CHARS: ${PDF_ATTACHMENT_CONTEXT_CHARS:-30000}
-      GIST_REGULATIONS_SYSTEM_KEY: ${GIST_REGULATIONS_SYSTEM_KEY:-gist-regulations}
-      GIST_REGULATIONS_COLLECTION_NAME: ${GIST_REGULATIONS_COLLECTION_NAME:-GIST Regulations}
-      GIST_REGULATIONS_COLLECTION_DESCRIPTION: ${GIST_REGULATIONS_COLLECTION_DESCRIPTION:-Authoritative GIST regulations indexed for the Regulations workflow.}
+      GIST_REGULATIONS_INDEX_DIR: ${GIST_REGULATIONS_INDEX_DIR:-/app/jireumgil_index}
+      GIST_REGULATIONS_TOP_K: ${GIST_REGULATIONS_TOP_K:-5}
+      GIST_REGULATIONS_VECTOR_DIMENSIONS: ${GIST_REGULATIONS_VECTOR_DIMENSIONS:-1536}
+      GIST_REGULATIONS_CONTEXT_CHARS: ${GIST_REGULATIONS_CONTEXT_CHARS:-16000}
       CONVERSATION_HISTORY_MESSAGES: ${CONVERSATION_HISTORY_MESSAGES:-16}
       CONVERSATION_HISTORY_CHARS: ${CONVERSATION_HISTORY_CHARS:-24000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
@@ -255,20 +210,11 @@ services:
       OIDC_ROLES_CLAIM: ${OIDC_ROLES_CLAIM:-roles}
       OIDC_TEAM_CLAIM: ${OIDC_TEAM_CLAIM:-team_id}
 
-      OBJECT_STORE: ${OBJECT_STORE:-s3}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
-      S3_REGION: ${S3_REGION:-us-east-1}
-      S3_BUCKET: ${S3_BUCKET:-infonet-documents}
-      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-infonet}
-      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-change-this-minio-password}
-      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
     depends_on:
       postgres:
         condition: service_healthy
       litellm:
         condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=5)"]
       interval: 10s
@@ -276,7 +222,7 @@ services:
       retries: 20
       start_period: 20s
     volumes:
-      - ./imports:/imports:ro
+      - ./jireumgil_index:/app/jireumgil_index:ro
     ports:
       - "127.0.0.1:8000:8000"
 
@@ -295,8 +241,12 @@ services:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
       OPENAI_API_CONFIGS: >-
-        {"0":{"enable":true,"model_ids":["auto","chat","pdf","regulations","paper","grant","website"]}}
+        {"0":{"enable":true,"model_ids":["auto","direct","gist-regulations","research-paper"]}}
       DEFAULT_MODELS: "auto"
+      USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"
+      USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
+      WEBUI_BANNERS: >-
+        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · GIST Regulations · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
       ENABLE_NOTES: "false"
       ENABLE_CALENDAR: "false"
       ENABLE_AUTOMATIONS: "false"
@@ -324,7 +274,6 @@ services:
 volumes:
   postgres-data:
   redis-data:
-  minio-data:
   huggingface-cache:
   ollama-data:
   open-webui-data:

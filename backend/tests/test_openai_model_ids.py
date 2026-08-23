@@ -1,14 +1,10 @@
 from app.openai_compat import MODEL_TO_WORKFLOW
 
 
-def test_openwebui_workflow_ids_are_simple_and_unprefixed() -> None:
+def test_openwebui_exposes_only_active_modes() -> None:
     assert list(MODEL_TO_WORKFLOW) == [
         "auto",
-        "chat",
-        "pdf",
-        "regulations",
-        "paper",
-        "grant",
-        "website",
+        "direct",
+        "gist-regulations",
+        "research-paper",
     ]
-    assert all(not model_id.startswith("lab-") for model_id in MODEL_TO_WORKFLOW)
