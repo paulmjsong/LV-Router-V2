@@ -286,16 +286,17 @@ class LLMGateway:
         response_format: dict[str, Any] | None = None,
     ) -> LLMResult:
         max_tokens = self._effective_max_tokens(model_alias, max_tokens)
+        registration = self._stream_registrations.get(run_id)
+        stream_this_stage = registration is not None and stage in registration.stages
         logger.info(
             "LLM call alias=%s workflow=%s stage=%s stream=%s max_tokens=%d",
             model_alias,
             workflow_id,
             stage,
-            self._stream_registrations.get(run_id) is not None,
+            stream_this_stage,
             max_tokens,
         )
-        registration = self._stream_registrations.get(run_id)
-        if registration is not None and stage in registration.stages:
+        if stream_this_stage and registration is not None:
             return await self._chat_streamed(
                 user=user,
                 model_alias=model_alias,

@@ -107,38 +107,25 @@ def build_parent_graph(
             recommended_tier=recommended,
             quality=quality,
         )
-        reason = str(state.get("route_reason", ""))
-        confidence = float(state.get("route_confidence", 0.0))
-        if (
-            quality == Quality.BALANCED
-            and workflow == WorkflowId.DIRECT
-            and resolved == ModelTier.LOCAL_FAST
-            and confidence < services.settings.local_fast_min_confidence
-        ):
-            resolved = ModelTier.CLOUD_SMALL
-            reason = (
-                f"{reason} local-fast confidence {confidence:.2f} below "
-                f"{services.settings.local_fast_min_confidence:.2f}; promoted to cloud-small."
-            ).strip()
         return {
             "recommended_tier": resolved.value,
             "use_documents": workflow == WorkflowId.REGULATIONS,
-            "route_reason": reason,
+            "route_reason": str(state.get("route_reason", "")),
         }
 
     async def announce_route(state: ParentState) -> ParentState:
-        fallback = " · fallback" if state.get("route_fallback") else ""
-        confidence = float(state.get("route_confidence", 0.0))
+        is_fallback = bool(state.get("route_fallback"))
         auto_route = state.get("requested_workflow") == WorkflowId.AUTO.value
         difficulty = str(state.get("route_difficulty", "")).strip()
         diagnostics = ""
         if auto_route:
-            diagnostics = f" · difficulty {difficulty or 'unknown'} · confidence {confidence:.2f}"
+            status = "fallback" if is_fallback else "validated"
+            diagnostics = f" · difficulty {difficulty or 'unknown'} · router {status}"
         content = (
             f"> **Route:** `{state['workflow_id']}` → `{state['recommended_tier']}`"
-            f"{diagnostics}{fallback}\n"
+            f"{diagnostics}\n"
         )
-        if state.get("route_fallback"):
+        if is_fallback:
             content += f"> **Fallback reason:** {state.get('route_reason', 'router validation failed')}\n"
         content += "\n"
         await services.llm.emit_control(
