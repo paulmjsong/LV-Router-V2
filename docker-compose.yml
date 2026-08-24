@@ -8,14 +8,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-infonet}
     volumes:
       - postgres-data:/var/lib/postgresql/data
-    ports:
-      - "127.0.0.1:5432:5432"
+    # ports:
+    #   - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-infonet} -d ${POSTGRES_DB:-infonet}"]
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB -tAc 'SELECT 1' | grep -qx 1"]
       interval: 5s
       timeout: 5s
       retries: 20
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -23,6 +22,22 @@ services:
     volumes:
       - redis-data:/data
 
+
+  litellm-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LITELLM_DB_USER:-litellm}
+      POSTGRES_PASSWORD: ${LITELLM_DB_PASSWORD:?Set LITELLM_DB_PASSWORD in .env}
+      POSTGRES_DB: ${LITELLM_DB_NAME:-litellm}
+    volumes:
+      - litellm-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "PGPASSWORD=$$POSTGRES_PASSWORD psql -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB -tAc 'SELECT 1' | grep -qx 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
 
   vllm:
     image: ${VLLM_IMAGE:-vllm/vllm-openai:latest}
@@ -111,7 +126,7 @@ services:
         python /config/render_config.py &&
         exec litellm --config /tmp/litellm-config.yaml --host 0.0.0.0 --port 4000 --num_workers ${LITELLM_WORKERS:-1}
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-infonet}:${POSTGRES_PASSWORD:-infonet}@postgres:5432/${POSTGRES_DB:-infonet}
+      DATABASE_URL: postgresql://${LITELLM_DB_USER:-litellm}:${LITELLM_DB_PASSWORD:?Set LITELLM_DB_PASSWORD in .env}@litellm-db:5432/${LITELLM_DB_NAME:-litellm}
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-change-me}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:-sk-change-this-once-and-never-rotate}
       LITELLM_ROUTING_STRATEGY: ${LITELLM_ROUTING_STRATEGY:-least-busy}
@@ -154,7 +169,7 @@ services:
       - ./infra/litellm/render_config.py:/config/render_config.py:ro
       - ./infra/litellm/ollama_startup_gate.py:/config/ollama_startup_gate.py:ro
     depends_on:
-      postgres:
+      litellm-db:
         condition: service_healthy
       redis:
         condition: service_started
@@ -164,9 +179,8 @@ services:
       timeout: 6s
       retries: 30
       start_period: ${LITELLM_START_PERIOD:-20m}
-    ports:
-      - "127.0.0.1:4000:4000"
-
+    # ports:
+    #   - "127.0.0.1:4000:4000"
   backend:
     build: ./backend
     restart: unless-stopped
@@ -272,6 +286,7 @@ services:
       - "3000:8080"
 
 volumes:
+  litellm-postgres-data:
   postgres-data:
   redis-data:
   huggingface-cache:
