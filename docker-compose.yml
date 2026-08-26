@@ -78,6 +78,7 @@ services:
       - ollama-data:/root/.ollama
     ports:
       - "127.0.0.1:11434:11434"
+    gpus: all
 
   ollama-init:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
