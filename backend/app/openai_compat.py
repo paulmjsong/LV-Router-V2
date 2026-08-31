@@ -159,7 +159,6 @@ def _chunk(completion_id: str, model: str, content: str, finish_reason: str | No
 def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserContext, completion_id: str):
     async def generate():
         queue: asyncio.Queue[LLMStreamChunk | Exception | None] = asyncio.Queue()
-        served_model_seen = False
 
         async def sink(chunk: LLMStreamChunk) -> None:
             await queue.put(chunk)
@@ -192,7 +191,8 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
 
         task = asyncio.create_task(run())
         try:
-            yield _chunk(completion_id, payload.model, "> **Status:** routing request…\n\n")
+            # Open the SSE stream immediately without adding a visible status line.
+            yield _chunk(completion_id, payload.model, "")
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -230,19 +230,6 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                         finish_reason="stop",
                     )
                     break
-                # Control events such as route and workflow-step may arrive before
-                # the actual answer. Do not mislabel those as the served answer model.
-                if (
-                    item.event_type == "token"
-                    and item.served_model
-                    and not served_model_seen
-                ):
-                    served_model_seen = True
-                    yield _chunk(
-                        completion_id,
-                        payload.model,
-                        f"> **Served model:** `{item.served_model}`\n\n",
-                    )
                 if item.content:
                     yield _chunk(
                         completion_id,

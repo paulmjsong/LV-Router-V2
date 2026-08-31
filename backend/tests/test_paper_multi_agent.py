@@ -12,6 +12,7 @@ from app.workflows.builders import WorkflowServices, build_paper_subgraph
 class FakeLLM:
     def __init__(self) -> None:
         self.calls = []
+        self.controls = []
 
     async def chat(self, **kwargs):
         self.calls.append(kwargs)
@@ -35,6 +36,9 @@ class FakeLLM:
         else:
             content = f"{stage} output"
         return LLMResult(content=content, requested_alias=kwargs["model_alias"], served_model="fake")
+
+    async def emit_control(self, **kwargs):
+        self.controls.append(kwargs)
 
     @staticmethod
     def extract_json_object(content: str):
@@ -71,3 +75,6 @@ async def test_paper_graph_runs_orchestrator_parallel_subagents_validator_and_fi
     assert stages[3:] == ["draft", "validator", "final"]
     assert result["answer"] == "Final validated abstract with [RESULT NEEDED]."
     assert {item["agent"] for item in result["paper_agent_outputs"]} == {"content", "structure"}
+    assert [item["event_type"] for item in llm.controls] == ["workflow-step", "workflow-step"]
+    assert "Preparing the research-paper draft" in llm.controls[0]["content"]
+    assert "Reviewing and finalizing" in llm.controls[1]["content"]

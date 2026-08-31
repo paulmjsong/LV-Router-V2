@@ -226,7 +226,6 @@ class LLMGateway:
         served_model = model_alias
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
-        reasoning_notice_sent = False
         async for chunk in stream:
             served_model = str(
                 getattr(chunk, "model", served_model) or served_model
@@ -258,21 +257,6 @@ class LLMGateway:
                 )
             if text:
                 parts.append(text)
-            elif (
-                isinstance(reasoning, str)
-                and reasoning
-                and not reasoning_notice_sent
-            ):
-                reasoning_notice_sent = True
-                await sink(
-                    LLMStreamChunk(
-                        content=(
-                            "> **Model status:** hidden reasoning suppressed.\n\n"
-                        ),
-                        requested_alias=model_alias,
-                        served_model=served_model,
-                    )
-                )
             await sink(
                 LLMStreamChunk(
                     content=text,

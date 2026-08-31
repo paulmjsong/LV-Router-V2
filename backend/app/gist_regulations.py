@@ -4,8 +4,8 @@ import asyncio
 import pickle
 from pathlib import Path
 import re
-from typing import Any
-from urllib.parse import quote
+from typing import Any, Sequence
+from urllib.parse import quote, urlsplit, urlunsplit
 from uuid import NAMESPACE_URL, uuid5
 
 import numpy as np
@@ -19,11 +19,40 @@ from .schemas import SourceCitation
 _PROVISION_RE = re.compile(
     r"제\s*\d+\s*조(?:의\s*\d+)?(?:\s*제\s*\d+\s*항)?(?:\s*제\s*\d+\s*호)?"
 )
+_ARTICLE_RE = re.compile(
+    r"(제\s*\d+\s*조(?:의\s*\d+)?)(?:\s*\(([^)\n]{1,80})\))?"
+)
 _FR_CODE_RE = re.compile(r"FR\d+", re.IGNORECASE)
 _REFERENCES_RE = re.compile(
     r"(?im)^\s*(?:#{1,6}\s*)?📌\s*(?:\*\*)?"
     r"(?:references|참조\s*조항|참고\s*문헌)(?:\*\*)?\s*$"
 )
+_TRAILING_REFERENCES_RE = re.compile(
+    r"(?ims)\n+(?:#{1,6}\s*)?(?:📌\s*)?(?:\*\*)?"
+    r"(?:references|sources|참조\s*조항|참고\s*문헌)(?:\*\*)?\s*\n.*\Z"
+)
+_CIRCLED_PARAGRAPHS = {
+    "①": 1,
+    "②": 2,
+    "③": 3,
+    "④": 4,
+    "⑤": 5,
+    "⑥": 6,
+    "⑦": 7,
+    "⑧": 8,
+    "⑨": 9,
+    "⑩": 10,
+    "⑪": 11,
+    "⑫": 12,
+    "⑬": 13,
+    "⑭": 14,
+    "⑮": 15,
+    "⑯": 16,
+    "⑰": 17,
+    "⑱": 18,
+    "⑲": 19,
+    "⑳": 20,
+}
 
 
 class _RestrictedUnpickler(pickle.Unpickler):
@@ -137,7 +166,6 @@ class GISTRegulationsRetriever:
 
     @staticmethod
     def _pdf_url(path: Path, page: int | None) -> str:
-        # The PDFs are mounted into Open WebUI's same-origin static directory.
         url = f"/static/gist-regulations/{quote(path.name, safe='')}"
         if page is not None:
             url += f"#page={page}"
@@ -148,6 +176,61 @@ class GISTRegulationsRetriever:
         if source.url:
             return f"[{source.title}]({source.url})"
         return source.title
+
+    @staticmethod
+    def _base_url(url: str | None) -> str:
+        if not url:
+            return ""
+        parsed = urlsplit(url)
+        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, parsed.query, ""))
+
+    @staticmethod
+    def _normalize_article(article: str) -> str:
+        return re.sub(r"\s+", "", article)
+
+    @classmethod
+    def _provision_detail(cls, source: SourceCitation) -> str:
+        excerpt = source.excerpt
+        article_matches = list(_ARTICLE_RE.finditer(excerpt))
+        details: list[str] = []
+        for match in article_matches:
+            article = cls._normalize_article(match.group(1))
+            title = " ".join((match.group(2) or "").split())
+            label = f"{article}({title})" if title else article
+            if label not in details:
+                details.append(label)
+            if len(details) >= 3:
+                break
+
+        if len(details) == 1:
+            paragraphs = sorted(
+                {
+                    number
+                    for symbol, number in _CIRCLED_PARAGRAPHS.items()
+                    if symbol in excerpt
+                }
+            )
+            if paragraphs:
+                if len(paragraphs) > 1 and paragraphs == list(
+                    range(paragraphs[0], paragraphs[-1] + 1)
+                ):
+                    paragraph_text = f"제{paragraphs[0]}항–제{paragraphs[-1]}항"
+                else:
+                    paragraph_text = ", ".join(f"제{number}항" for number in paragraphs[:4])
+                details[0] = f"{details[0]} {paragraph_text}"
+
+        if not details:
+            for provision in _PROVISION_RE.findall(excerpt):
+                normalized = re.sub(r"\s+", "", provision)
+                if normalized not in details:
+                    details.append(normalized)
+                if len(details) >= 3:
+                    break
+        if details:
+            return ", ".join(details)
+        if source.page is not None:
+            return f"PDF p.{source.page}"
+        return ""
 
     async def retrieve(
         self,
@@ -221,19 +304,20 @@ class GISTRegulationsRetriever:
         return results
 
     def context_from_sources(self, sources: list[SourceCitation]) -> str:
-        blocks: list[str] = []
-        used = 0
+        blocks: list[str] = [
+            "CITATION SCOPE: Use only the links and provisions in this current evidence block."
+        ]
+        used = len(blocks[0]) + 2
         for rank, source in enumerate(sources, start=1):
             citation = self._markdown_link(source)
             page = str(source.page) if source.page is not None else "unknown"
-            provisions = list(dict.fromkeys(_PROVISION_RE.findall(source.excerpt)))[:6]
-            provision_text = ", ".join(provisions) if provisions else "not pre-extracted"
+            detail = self._provision_detail(source) or "not pre-extracted"
             block = (
                 f"[SOURCE {rank}]\n"
                 f"Citation: {citation}\n"
                 f"Regulation: {source.title}\n"
                 f"PDF page: {page}\n"
-                f"Detected provisions: {provision_text}\n"
+                f"Provision labels: {detail}\n"
                 f"Evidence:\n{source.excerpt}"
             )
             if used + len(block) > self.settings.gist_regulations_context_chars:
@@ -242,18 +326,46 @@ class GISTRegulationsRetriever:
             used += len(block) + 2
         return "\n\n".join(blocks)
 
-    def references_markdown(self, sources: list[SourceCitation]) -> str:
-        lines = ["\n\n📌 **References**"]
-        seen: set[tuple[str, str | None, int | None]] = set()
-        for source in sources:
-            key = (source.title, source.url, source.page)
+    @classmethod
+    def strip_generated_references(cls, answer: str) -> str:
+        return _TRAILING_REFERENCES_RE.sub("", answer.strip()).strip()
+
+    @classmethod
+    def _selected_sources(
+        cls,
+        answer: str,
+        sources: Sequence[SourceCitation],
+    ) -> list[SourceCitation]:
+        ranks = {
+            int(value)
+            for value in re.findall(r"\[SOURCE\s+(\d+)\]", answer, flags=re.IGNORECASE)
+        }
+        selected: list[SourceCitation] = []
+        for rank, source in enumerate(sources, start=1):
+            cited_by_rank = rank in ranks
+            cited_by_url = bool(source.url and source.url in answer)
+            cited_by_base_url = bool(
+                source.url and cls._base_url(source.url) in answer
+            )
+            if cited_by_rank or cited_by_url or cited_by_base_url:
+                selected.append(source)
+        return selected or list(sources)
+
+    def references_markdown(
+        self,
+        sources: Sequence[SourceCitation],
+        *,
+        answer: str = "",
+    ) -> str:
+        selected = self._selected_sources(answer, sources) if answer else list(sources)
+        lines = ["\n\n### 📌 References"]
+        seen: set[tuple[str, str, str]] = set()
+        for source in selected:
+            detail = self._provision_detail(source)
+            key = (source.title, self._base_url(source.url), detail)
             if key in seen:
                 continue
             seen.add(key)
-            provisions = list(dict.fromkeys(_PROVISION_RE.findall(source.excerpt)))[:4]
-            detail = ", ".join(provisions)
-            if not detail and source.page is not None:
-                detail = f"PDF p.{source.page}"
             suffix = f" — {detail}" if detail else ""
             lines.append(f"- {self._markdown_link(source)}{suffix}")
         return "\n".join(lines) if len(lines) > 1 else ""
@@ -266,7 +378,9 @@ class GISTRegulationsRetriever:
         answer: str,
         sources: list[SourceCitation],
     ) -> str:
-        formatted = answer.strip()
+        original = answer.strip()
+        selected = self._selected_sources(original, sources)
+        formatted = self.strip_generated_references(original)
         for rank, source in enumerate(sources, start=1):
             formatted = re.sub(
                 rf"\[SOURCE\s+{rank}\]",
@@ -274,6 +388,4 @@ class GISTRegulationsRetriever:
                 formatted,
                 flags=re.IGNORECASE,
             )
-        if not self.has_references_section(formatted):
-            formatted += self.references_markdown(sources)
-        return formatted.strip()
+        return f"{formatted}{self.references_markdown(selected)}".strip()

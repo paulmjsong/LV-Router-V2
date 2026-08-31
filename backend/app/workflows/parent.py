@@ -115,18 +115,18 @@ def build_parent_graph(
 
     async def announce_route(state: ParentState) -> ParentState:
         is_fallback = bool(state.get("route_fallback"))
-        auto_route = state.get("requested_workflow") == WorkflowId.AUTO.value
-        difficulty = str(state.get("route_difficulty", "")).strip()
-        diagnostics = ""
-        if auto_route:
-            status = "fallback" if is_fallback else "validated"
-            diagnostics = f" · difficulty {difficulty or 'unknown'} · router {status}"
         content = (
-            f"> **Route:** `{state['workflow_id']}` → `{state['recommended_tier']}`"
-            f"{diagnostics}\n"
+            f"> **Route:** `{state['workflow_id']}` · "
+            f"`{state['recommended_tier']}`"
         )
         if is_fallback:
-            content += f"> **Fallback reason:** {state.get('route_reason', 'router validation failed')}\n"
+            content += " · fallback\n"
+            content += (
+                f"> **Fallback:** "
+                f"{state.get('route_reason', 'router validation failed')}\n"
+            )
+        else:
+            content += "\n"
         content += "\n"
         await services.llm.emit_control(
             run_id=state["run_id"],

@@ -260,6 +260,48 @@ def main() -> None:
                 "User-facing application-level answer token ceiling remains: "
                 f"{token_cap}"
             )
+    # v0.7: concise progress UI and canonical citations across turns.
+    if "> **Status:** routing request" in compat:
+        fail("Visible routing status noise remains in the OpenAI stream adapter")
+    if "> **Served model:**" in compat:
+        fail("Redundant served-model line remains in the OpenAI stream adapter")
+
+    parent_source = read("backend/app/workflows/parent.py")
+    if "difficulty {difficulty" in parent_source or "router {status}" in parent_source:
+        fail("Verbose route diagnostics remain in the normal route line")
+
+    regulations = function(builders, None, "build_regulations_subgraph")
+    regulations_source = ast.get_source_segment(builders_text, regulations) or ""
+    if direct_calls and "_emit_step" in (ast.get_source_segment(builders_text, direct) or ""):
+        fail("Direct workflow should not emit a separate workflow-step line")
+    if regulations_source.count("_emit_step(") != 1:
+        fail("GIST workflow must emit exactly one concise progress step")
+    if web_source.count("_emit_step(") != 1:
+        fail("Web-search workflow must emit exactly one concise progress step")
+    if paper_source.count("_emit_step(") != 2:
+        fail("Research-paper workflow must emit exactly two concise progress steps")
+
+    if "previous_queries=_prior_user_queries(state)" not in web_source:
+        fail("Web-search workflow does not preserve news mode across follow-up turns")
+    if "strip_citations=True" not in web_source or "strip_citations=True" not in regulations_source:
+        fail("Prior citation lists are still being fed into grounded follow-up prompts")
+    for term in ("_resolved_news_topic", "strip_generated_sources", "format_answer", "Published "):
+        if term not in web_service:
+            fail(f"Web citation consistency implementation missing: {term}")
+
+    for term in ("strip_generated_references", "_provision_detail", "format_answer"):
+        if term not in gist:
+            fail(f"Canonical GIST reference implementation missing: {term}")
+    prompts = read("backend/app/workflows/prompts.py")
+    if "Do not write a References section" not in prompts:
+        fail("GIST answer prompt does not delegate reference formatting to the backend")
+    if "Source numbers reset on every turn" not in prompts:
+        fail("Web-search prompt does not reset citation scope on each turn")
+
+    llm_source = read("backend/app/llm.py")
+    if "hidden reasoning suppressed" in llm_source:
+        fail("Hidden-reasoning status text still leaks into the user-facing response")
+
     print("STATIC_INVARIANTS_PASS")
 
 

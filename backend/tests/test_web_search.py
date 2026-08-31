@@ -3,7 +3,7 @@ import sys
 from uuid import NAMESPACE_URL, uuid5
 
 import pytest
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.llm import LLMResult
 from app.routing import StageModelPolicy
@@ -85,7 +85,7 @@ async def test_latest_news_uses_news_endpoint_and_sorts_dated_articles(monkeypat
                     "source": "Example News",
                 },
                 {
-                    "date": "2026-08-31T09:00:00+00:00",
+                    "date": "Sun, 31 Aug 2026 09:00:00 GMT",
                     "title": "Newest concrete event",
                     "url": "https://news.example.com/2026/08/31/newest-event",
                     "body": "A newer event happened in Morocco.",
@@ -119,6 +119,51 @@ async def test_latest_news_uses_news_endpoint_and_sorts_dated_articles(monkeypat
     assert "Generic publisher homepage" not in context
 
 
+@pytest.mark.asyncio
+async def test_news_followup_reuses_news_mode_topic_and_dates(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class FakeDDGS:
+        def __init__(self, **kwargs) -> None:
+            pass
+
+        def text(self, *args, **kwargs):
+            raise AssertionError("news follow-ups must stay on the news endpoint")
+
+        def news(self, query, **kwargs):
+            calls.append(query)
+            return [{
+                "date": "2026-08-31T11:30:00Z",
+                "title": "Morocco economy update",
+                "url": "https://news.example.com/2026/08/31/morocco-economy",
+                "body": "A dated article about Morocco's economy.",
+                "source": "Example News",
+            }]
+
+    module = ModuleType("ddgs")
+    module.DDGS = FakeDDGS
+    monkeypatch.setitem(sys.modules, "ddgs", module)
+
+    service = WebSearchService(web_settings())
+    results = await service.search(
+        "What about the economy?",
+        previous_queries=[
+            "Tell me the latest news on Morocco.",
+            "Any political developments?",
+        ],
+    )
+
+    assert calls == ["Morocco economy"]
+    assert results[0].published_at == "2026-08-31 11:30 UTC"
+    rendered = service.format_answer(
+        "A dated update [1].\n\n### Sources\n1. stale source without date",
+        results,
+    )
+    assert rendered.count("### Sources") == 1
+    assert "Published 2026-08-31 11:30 UTC" in rendered
+    assert "stale source without date" not in rendered
+
+
 class FakeLLM:
     def __init__(self) -> None:
         self.calls = []
@@ -137,8 +182,12 @@ class FakeLLM:
 
 
 class FakeWebSearch:
-    async def search(self, query: str):
-        assert query == "What is the latest news?"
+    def __init__(self) -> None:
+        self.previous_queries = None
+
+    async def search(self, query: str, *, previous_queries=()):
+        assert query == "What about the economy?"
+        self.previous_queries = list(previous_queries)
         url = "https://example.com/2026/08/31/event"
         return [
             SourceCitation(
@@ -165,27 +214,33 @@ class FakeWebSearch:
 
     @staticmethod
     def sources_markdown(sources):
-        source = sources[0]
-        return (
-            f"\n\n### Sources\n1. [{source.title}]({source.url}) — "
-            f"{source.publisher}, {source.published_at}"
-        )
+        return WebSearchService.sources_markdown(sources)
+
+    @staticmethod
+    def format_answer(answer, sources):
+        service = object.__new__(WebSearchService)
+        return WebSearchService.format_answer(service, answer, sources)
 
 
 @pytest.mark.asyncio
-async def test_web_search_subgraph_answers_with_dated_sources() -> None:
+async def test_web_search_subgraph_uses_prior_queries_and_one_step() -> None:
     llm = FakeLLM()
+    web_search = FakeWebSearch()
     services = WorkflowServices(
         llm=llm,
         regulations=SimpleNamespace(),
-        web_search=FakeWebSearch(),
+        web_search=web_search,
         policy=StageModelPolicy(),
         settings=SimpleNamespace(),
     )
     graph = build_web_search_subgraph(services)
     result = await graph.ainvoke({
-        "messages": [HumanMessage(content="What is the latest news?")],
-        "query": "What is the latest news?",
+        "messages": [
+            HumanMessage(content="Tell me the latest news on Morocco."),
+            AIMessage(content="Earlier answer.\n\n### Sources\n1. old undated source"),
+            HumanMessage(content="What about the economy?"),
+        ],
+        "query": "What about the economy?",
         "run_id": "r-web",
         "user_id": "u",
         "team_id": "lab",
@@ -198,10 +253,16 @@ async def test_web_search_subgraph_answers_with_dated_sources() -> None:
     })
 
     assert [call["stage"] for call in llm.calls] == ["answer"]
+    assert web_search.previous_queries == ["Tell me the latest news on Morocco."]
     prompt = llm.calls[0]["messages"][1]["content"]
     assert "SEARCH MODE: NEWS" in prompt
+    assert "old undated source" not in prompt
     assert result["answer"].endswith(
         "[Concrete event](https://example.com/2026/08/31/event) — "
-        "Example News, 2026-08-31 09:00 UTC"
+        "Example News · Published 2026-08-31 09:00 UTC"
     )
-    assert llm.controls[0]["event_type"] == "sources"
+    assert [item["event_type"] for item in llm.controls] == [
+        "workflow-step",
+        "sources",
+    ]
+    assert "Searching the web" in llm.controls[0]["content"]
