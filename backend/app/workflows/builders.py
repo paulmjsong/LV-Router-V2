@@ -305,7 +305,7 @@ def build_web_search_subgraph(services: WorkflowServices):
         await _emit_step(
             state,
             services,
-            "Searching the web…",
+            "Checking live sources…",
             alias=WorkflowId.WEB_SEARCH.value,
         )
         try:

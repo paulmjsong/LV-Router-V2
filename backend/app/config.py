@@ -49,6 +49,14 @@ class Settings(BaseSettings):
     web_search_query_chars: int = Field(default=1000, ge=100, le=5000)
     web_search_snippet_chars: int = Field(default=1200, ge=200, le=4000)
     web_search_context_chars: int = Field(default=12000, ge=1000, le=50000)
+    web_search_auto_region: bool = True
+    web_search_fetch_pages: bool = True
+    web_search_fetch_max_pages: int = Field(default=4, ge=0, le=8)
+    web_search_fetch_concurrency: int = Field(default=3, ge=1, le=8)
+    web_search_fetch_timeout_seconds: float = Field(default=8.0, ge=2.0, le=30.0)
+    web_search_fetch_max_bytes: int = Field(default=1000000, ge=100000, le=5000000)
+    web_search_fetch_max_redirects: int = Field(default=3, ge=0, le=6)
+    web_search_page_chars: int = Field(default=6500, ge=1000, le=20000)
 
     auth_mode: Literal["dev", "oidc", "cloudflare_access", "openwebui"] = "dev"
     auth_token_header: str = "Cf-Access-Jwt-Assertion"

@@ -64,6 +64,7 @@ class SourceCitation(BaseModel):
     url: str | None = None
     published_at: str | None = None
     publisher: str | None = None
+    accessed_at: str | None = None
 
 
 class ChatResponse(BaseModel):

@@ -97,8 +97,17 @@ def main() -> None:
     for term in ("from ddgs import DDGS", ".text(", "backend=self.settings.web_search_backend", 'source_type="web"'):
         if term not in web_service:
             fail(f"DDGS web-search service is incomplete: missing {term}")
-    if ".extract(" in web_service or "httpx.get(" in web_service or "requests.get(" in web_service:
-        fail("Web search must remain snippet-only; arbitrary result-page fetching is not allowed")
+    for term in (
+        "BeautifulSoup",
+        "_ensure_public_url",
+        "web_search_fetch_max_bytes",
+        "web_search_fetch_timeout_seconds",
+        "follow_redirects=False",
+        "_weather_source",
+        "Open-Meteo",
+    ):
+        if term not in web_service:
+            fail(f"Safe live-evidence web retrieval is incomplete: {term}")
 
     paper = function(builders, None, "build_paper_subgraph")
     paper_source = ast.get_source_segment(builders_text, paper) or ""
@@ -288,6 +297,9 @@ def main() -> None:
     for term in ("_resolved_news_topic", "strip_generated_sources", "format_answer", "Published "):
         if term not in web_service:
             fail(f"Web citation consistency implementation missing: {term}")
+    for term in ("Accessed ", "accessed_at", "kr-kr", "_weather_source"):
+        if term not in web_service:
+            fail(f"Web live-evidence consistency implementation missing: {term}")
 
     for term in ("strip_generated_references", "_provision_detail", "format_answer"):
         if term not in gist:
