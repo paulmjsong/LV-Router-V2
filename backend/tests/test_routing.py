@@ -27,13 +27,21 @@ class FakeRouterLLM:
         return json.loads(content)
 
 
-def settings(min_confidence: float = 0.55):
+def settings():
     return SimpleNamespace(
         local_router_model_alias="local-router",
         local_router_max_tokens=64,
-        local_router_min_confidence=min_confidence,
+        local_router_min_confidence=0.55,
         local_router_fallback_tier="cloud-small",
     )
+
+
+ALL_ACTIVE = [
+    WorkflowId.DIRECT,
+    WorkflowId.REGULATIONS,
+    WorkflowId.WEB_SEARCH,
+    WorkflowId.PAPER,
+]
 
 
 @pytest.mark.asyncio
@@ -43,8 +51,10 @@ def settings(min_confidence: float = 0.55):
         (WorkflowId.DIRECT, RouteDifficulty.SIMPLE, ModelTier.LOCAL_FAST, False),
         (WorkflowId.DIRECT, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
         (WorkflowId.DIRECT, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
-        # Specialists are never accepted as simple/local-fast.
+        # Specialist routes have a cloud-small floor.
         (WorkflowId.REGULATIONS, RouteDifficulty.SIMPLE, ModelTier.CLOUD_SMALL, True),
+        (WorkflowId.WEB_SEARCH, RouteDifficulty.SIMPLE, ModelTier.CLOUD_SMALL, False),
+        (WorkflowId.WEB_SEARCH, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
         (WorkflowId.PAPER, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL, False),
         (WorkflowId.PAPER, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE, False),
     ],
@@ -53,13 +63,12 @@ async def test_router_maps_supported_outcomes(workflow, difficulty, tier, uses_d
     llm = FakeRouterLLM({
         "workflow": workflow.value,
         "difficulty": difficulty.value,
-        "confidence": 0.96,
     })
     router = LocalSemanticRouter(llm, settings())
     outcome = await router.decide(
         query="Representative request",
         history=[],
-        allowed_workflows=[WorkflowId.DIRECT, WorkflowId.REGULATIONS, WorkflowId.PAPER],
+        allowed_workflows=ALL_ACTIVE,
         user=UserContext(user_id="u", team_id="lab", roles={"member"}),
         run_id="run-1",
     )
@@ -71,16 +80,15 @@ async def test_router_maps_supported_outcomes(workflow, difficulty, tier, uses_d
 
 
 @pytest.mark.asyncio
-async def test_invalid_or_low_confidence_router_never_falls_back_to_local_fast() -> None:
+async def test_invalid_router_falls_back_visibly_to_cloud_small() -> None:
     llm = FakeRouterLLM({
-        "workflow": "direct",
+        "workflow": "not-a-workflow",
         "difficulty": "simple",
-        "confidence": 0.10,
     })
     outcome = await LocalSemanticRouter(llm, settings()).decide(
         query="Ambiguous",
         history=[],
-        allowed_workflows=[WorkflowId.DIRECT, WorkflowId.REGULATIONS, WorkflowId.PAPER],
+        allowed_workflows=ALL_ACTIVE,
         user=UserContext(user_id="u", roles={"member"}),
         run_id="run-2",
     )
@@ -91,7 +99,7 @@ async def test_invalid_or_low_confidence_router_never_falls_back_to_local_fast()
 
 def test_balanced_specialists_have_cloud_small_floor() -> None:
     policy = StageModelPolicy()
-    for workflow in (WorkflowId.REGULATIONS, WorkflowId.PAPER):
+    for workflow in (WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER):
         assert policy.stage_alias(
             workflow=workflow,
             recommended_tier=ModelTier.LOCAL_FAST,

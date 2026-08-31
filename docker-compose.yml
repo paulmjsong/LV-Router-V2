@@ -78,7 +78,9 @@ services:
       - ollama-data:/root/.ollama
     ports:
       - "127.0.0.1:11434:11434"
-    gpus: all
+    gpus:
+    - driver: nvidia
+      count: all
 
   ollama-init:
     image: ${OLLAMA_IMAGE:-ollama/ollama:latest}
@@ -205,6 +207,15 @@ services:
       GIST_REGULATIONS_TOP_K: ${GIST_REGULATIONS_TOP_K:-5}
       GIST_REGULATIONS_VECTOR_DIMENSIONS: ${GIST_REGULATIONS_VECTOR_DIMENSIONS:-1536}
       GIST_REGULATIONS_CONTEXT_CHARS: ${GIST_REGULATIONS_CONTEXT_CHARS:-16000}
+      WEB_SEARCH_MAX_RESULTS: ${WEB_SEARCH_MAX_RESULTS:-5}
+      WEB_SEARCH_TIMEOUT_SECONDS: ${WEB_SEARCH_TIMEOUT_SECONDS:-12}
+      WEB_SEARCH_REGION: ${WEB_SEARCH_REGION:-us-en}
+      WEB_SEARCH_SAFESEARCH: ${WEB_SEARCH_SAFESEARCH:-moderate}
+      WEB_SEARCH_BACKEND: ${WEB_SEARCH_BACKEND:-duckduckgo}
+      WEB_SEARCH_PROXY: ${WEB_SEARCH_PROXY:-}
+      WEB_SEARCH_QUERY_CHARS: ${WEB_SEARCH_QUERY_CHARS:-1000}
+      WEB_SEARCH_SNIPPET_CHARS: ${WEB_SEARCH_SNIPPET_CHARS:-1200}
+      WEB_SEARCH_CONTEXT_CHARS: ${WEB_SEARCH_CONTEXT_CHARS:-12000}
       CONVERSATION_HISTORY_MESSAGES: ${CONVERSATION_HISTORY_MESSAGES:-16}
       CONVERSATION_HISTORY_CHARS: ${CONVERSATION_HISTORY_CHARS:-24000}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
@@ -256,12 +267,14 @@ services:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
       OPENAI_API_CONFIGS: >-
-        {"0":{"enable":true,"model_ids":["auto","direct","gist-regulations","research-paper"]}}
+        {"0":{"enable":true,"model_ids":["auto","direct","gist-regulations","web-search","research-paper"]}}
       DEFAULT_MODELS: "auto"
       USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"
       USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
+      ENABLE_WEB_SEARCH: "false"
+      USER_PERMISSIONS_FEATURES_WEB_SEARCH: "false"
       WEBUI_BANNERS: >-
-        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · GIST Regulations · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
+        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · GIST Regulations · Web Search · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
       ENABLE_NOTES: "false"
       ENABLE_CALENDAR: "false"
       ENABLE_AUTOMATIONS: "false"

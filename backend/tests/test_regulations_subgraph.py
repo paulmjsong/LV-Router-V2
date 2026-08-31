@@ -46,6 +46,7 @@ async def test_regulations_is_straight_retrieve_then_answer_rag() -> None:
     services = WorkflowServices(
         llm=llm,
         regulations=regulations,
+        web_search=SimpleNamespace(),
         policy=StageModelPolicy(),
         settings=SimpleNamespace(embedding_model_alias="embedding"),
     )

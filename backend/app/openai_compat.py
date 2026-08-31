@@ -25,12 +25,14 @@ MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
     "auto": WorkflowId.AUTO,
     "direct": WorkflowId.DIRECT,
     "gist-regulations": WorkflowId.REGULATIONS,
+    "web-search": WorkflowId.WEB_SEARCH,
     "research-paper": WorkflowId.PAPER,
 }
 MODEL_DESCRIPTIONS: dict[str, str] = {
     "auto": "Auto",
     "direct": "Direct",
     "gist-regulations": "GIST Regulations",
+    "web-search": "Web Search",
     "research-paper": "Research Paper Drafting",
 }
 

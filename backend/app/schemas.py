@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
@@ -10,6 +11,7 @@ class WorkflowId(StrEnum):
     AUTO = "auto"
     DIRECT = "direct"
     REGULATIONS = "gist-regulations"
+    WEB_SEARCH = "web-search"
     PAPER = "research-paper"
     GRANT = "grant"
     WEBSITE = "website"
@@ -52,12 +54,16 @@ class ChatRequest(BaseModel):
 
 
 class SourceCitation(BaseModel):
+    source_type: Literal["document", "web"] = "document"
     chunk_id: int
     document_id: UUID
     title: str
     page: int | None = None
     score: float
     excerpt: str
+    url: str | None = None
+    published_at: str | None = None
+    publisher: str | None = None
 
 
 class ChatResponse(BaseModel):

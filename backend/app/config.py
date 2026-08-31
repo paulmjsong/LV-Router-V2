@@ -40,6 +40,15 @@ class Settings(BaseSettings):
     gist_regulations_top_k: int = Field(default=5, ge=1, le=20)
     gist_regulations_vector_dimensions: int = Field(default=1536, ge=128, le=8192)
     gist_regulations_context_chars: int = Field(default=16000, ge=2000, le=50000)
+    web_search_max_results: int = Field(default=5, ge=1, le=10)
+    web_search_timeout_seconds: float = Field(default=12.0, ge=2.0, le=60.0)
+    web_search_region: str = "us-en"
+    web_search_safesearch: Literal["on", "moderate", "off"] = "moderate"
+    web_search_backend: str = "duckduckgo"
+    web_search_proxy: str | None = None
+    web_search_query_chars: int = Field(default=1000, ge=100, le=5000)
+    web_search_snippet_chars: int = Field(default=1200, ge=200, le=4000)
+    web_search_context_chars: int = Field(default=12000, ge=1000, le=50000)
 
     auth_mode: Literal["dev", "oidc", "cloudflare_access", "openwebui"] = "dev"
     auth_token_header: str = "Cf-Access-Jwt-Assertion"

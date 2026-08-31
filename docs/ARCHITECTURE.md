@@ -1,8 +1,6 @@
-# Infonet AI Router v0.4 Architecture
+# Infonet AI Router v0.5 Architecture
 
 ## Parent LangGraph
-
-The control plane is one compiled parent graph with isolated workflow subgraphs:
 
 ```text
 START
@@ -12,12 +10,13 @@ START
   -> conditional dispatch
        |- direct
        |- gist-regulations
+       |- web-search
        `- research-paper
   -> finalize
   -> END
 ```
 
-`grant` and `website` exist only as disabled workflow metadata so the UI can communicate “coming soon”; they are not graph nodes and the local router cannot select them.
+Every `auto` request goes through the local semantic router. Explicitly selecting a mode bypasses semantic classification but still executes through the same parent graph. Grant and Website remain disabled metadata only.
 
 ## Direct subgraph
 
@@ -25,47 +24,44 @@ START
 
 ## GIST Regulations subgraph
 
-`START -> retrieve -> answer -> END`.
+`START -> retrieve -> answer -> END`. The query is embedded through LiteLLM, searched against the read-only Jireumgil FAISS index, and answered from numbered retrieved passages. This differs from the blueprint's PostgreSQL/pgvector description because the current product requirement is to reuse the supplied legacy vectorstore.
 
-`retrieve`:
-1. embeds the query through LiteLLM alias `embedding`;
-2. performs top-k FAISS search over `jireumgil_index/index.faiss`;
-3. resolves FAISS IDs through the supplied `index.pkl` docstore mapping;
-4. formats source snippets.
+## Web Search subgraph
 
-`answer` calls the selected answer tier and must ground the response in those snippets.
+`START -> search -> answer -> END`.
 
-The supplied vectorstore is read-only. No user upload pipeline exists.
+1. `WebSearchService` runs `DDGS.text()` with the DuckDuckGo backend in a worker thread.
+2. A workflow timeout bounds the blocking search call.
+3. Results are normalized, URL-validated, deduplicated, and limited.
+4. The answer node receives only numbered titles, URLs, and snippets marked as untrusted evidence.
+5. The LLM must cite claims as `[1]`, `[2]`, etc.
+6. The backend appends a deterministic Markdown source list and returns structured source metadata.
+
+The service does not fetch result pages. Open WebUI's native web-search feature is disabled to avoid a second, competing search path.
 
 ## Research Paper Drafting subgraph
 
 ```text
 START -> orchestrator
-             |             | +-> content_agent ---             `---> structure_agent --+-> draft -> validator -> final -> END
+             |
+             +-> content_agent ---
+             `-> structure_agent --+-> draft -> validator -> final -> END
 ```
 
-This is a minimal multi-agent composition:
-- orchestrator = planning agent;
-- content_agent and structure_agent = parallel specialist subagents;
-- draft = synthesis agent;
-- validator = independent validation agent;
-- final = correction/finalization agent.
-
-Each node is an independent LLM call and receives a stage-specific system prompt. It is deliberately not a literature-search or experiment-validation system yet.
+This existing sequential/parallel LLM workflow is treated as covering the blueprint's research-drafter route; no Hermes dependency is added.
 
 ## Model routing
 
-The local routing model classifies workflow + difficulty. Application policy maps difficulty to LiteLLM aliases and enforces specialist floors. LiteLLM handles the concrete provider/deployment, credentials, budgets, rate limits, retries/fallbacks, and accounting.
+The local router classifies workflow + difficulty. Application policy maps difficulty to LiteLLM aliases and enforces specialist floors. LiteLLM handles provider/deployment mapping, credentials, budgets, rate limits, retries/fallbacks, and accounting.
 
 ## UI modes
-
-Selectable provider models exposed to Open WebUI:
 
 ```text
 auto
 direct
 gist-regulations
+web-search
 research-paper
 ```
 
-`DEFAULT_MODELS=auto`. File and web attachments are disabled for normal users, and the backend rejects requests carrying files. Grant/Website are rendered as grey “coming soon” status in an Open WebUI banner because provider-backed model lists do not have a reliable portable disabled-model state.
+`DEFAULT_MODELS=auto`. File uploads and Open WebUI native web search remain disabled; the routed `web-search` workflow is the only live-search path.

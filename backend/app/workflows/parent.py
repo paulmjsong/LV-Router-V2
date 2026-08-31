@@ -149,6 +149,7 @@ def build_parent_graph(
     graph.add_node("announce_route", announce_route)
     graph.add_node(WorkflowId.DIRECT.value, subgraphs.direct)
     graph.add_node(WorkflowId.REGULATIONS.value, subgraphs.regulations)
+    graph.add_node(WorkflowId.WEB_SEARCH.value, subgraphs.web_search)
     graph.add_node(WorkflowId.PAPER.value, subgraphs.paper)
     graph.add_node("finalize", finalize)
     graph.add_edge(START, "route")
@@ -160,10 +161,16 @@ def build_parent_graph(
         {
             WorkflowId.DIRECT.value: WorkflowId.DIRECT.value,
             WorkflowId.REGULATIONS.value: WorkflowId.REGULATIONS.value,
+            WorkflowId.WEB_SEARCH.value: WorkflowId.WEB_SEARCH.value,
             WorkflowId.PAPER.value: WorkflowId.PAPER.value,
         },
     )
-    for workflow in (WorkflowId.DIRECT, WorkflowId.REGULATIONS, WorkflowId.PAPER):
+    for workflow in (
+        WorkflowId.DIRECT,
+        WorkflowId.REGULATIONS,
+        WorkflowId.WEB_SEARCH,
+        WorkflowId.PAPER,
+    ):
         graph.add_edge(workflow.value, "finalize")
     graph.add_edge("finalize", END)
     return graph.compile(checkpointer=checkpointer)

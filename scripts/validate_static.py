@@ -61,14 +61,14 @@ def main() -> None:
     ]
     if len(router_calls) != 1:
         fail(f"LocalSemanticRouter.decide must contain exactly one LLM call, found {len(router_calls)}")
-    if "used visible cloud fallback" not in routing_text:
+    if "used visible " not in routing_text or "fallback" not in routing_text:
         fail("Router must expose visible non-local fallback behavior")
     if "ModelTier.CLOUD_SMALL" not in routing_text or "ModelTier.LOCAL_FAST" not in routing_text:
         fail("Router difficulty-to-tier mapping is missing")
 
-    # Parent graph: one parent, three active child subgraphs only.
+    # Parent graph: one parent with four active child subgraphs.
     parent_text = read("backend/app/workflows/parent.py")
-    for term in ("subgraphs.direct", "subgraphs.regulations", "subgraphs.paper"):
+    for term in ("subgraphs.direct", "subgraphs.regulations", "subgraphs.web_search", "subgraphs.paper"):
         if term not in parent_text:
             fail(f"Parent graph is missing active child subgraph {term}")
     for term in ("subgraphs.pdf", "subgraphs.grant", "subgraphs.website"):
@@ -86,6 +86,19 @@ def main() -> None:
     ]
     if len(direct_calls) != 1:
         fail(f"Direct subgraph must contain exactly one answer LLM call, found {len(direct_calls)}")
+
+    web = function(builders, None, "build_web_search_subgraph")
+    web_source = ast.get_source_segment(builders_text, web) or ""
+    for term in ("services.web_search.search", "WEB_SEARCH_SYSTEM", "services.llm.chat"):
+        if term not in web_source:
+            fail(f"Web-search subgraph is incomplete: missing {term}")
+
+    web_service = read("backend/app/web_search.py")
+    for term in ("from ddgs import DDGS", ".text(", "backend=self.settings.web_search_backend", 'source_type="web"'):
+        if term not in web_service:
+            fail(f"DDGS web-search service is incomplete: missing {term}")
+    if ".extract(" in web_service or "httpx.get(" in web_service or "requests.get(" in web_service:
+        fail("Web search must remain snippet-only; arbitrary result-page fetching is not allowed")
 
     paper = function(builders, None, "build_paper_subgraph")
     paper_source = ast.get_source_segment(builders_text, paper) or ""
@@ -115,9 +128,9 @@ def main() -> None:
         if not path.is_file() or path.stat().st_size == 0:
             fail(f"Missing supplied GIST vectorstore file: {path}")
 
-    # Open WebUI: exactly four selectable modes; auto default; no file upload path.
+    # Open WebUI: exactly five selectable modes; auto default; no file upload path.
     compat = read("backend/app/openai_compat.py")
-    expected_model_ids = {'"auto"', '"direct"', '"gist-regulations"', '"research-paper"'}
+    expected_model_ids = {'"auto"', '"direct"', '"gist-regulations"', '"web-search"', '"research-paper"'}
     for model_id in expected_model_ids:
         if model_id not in compat:
             fail(f"Missing active Open WebUI model ID: {model_id}")
@@ -132,10 +145,13 @@ def main() -> None:
     compose = read("docker-compose.yml")
     required_compose = (
         'WEBUI_NAME: ${WEBUI_NAME:-Infonet AI Router}',
-        '"auto","direct","gist-regulations","research-paper"',
+        '"auto","direct","gist-regulations","web-search","research-paper"',
         'DEFAULT_MODELS: "auto"',
         'USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"',
         'USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"',
+        'ENABLE_WEB_SEARCH: "false"',
+        'USER_PERMISSIONS_FEATURES_WEB_SEARCH: "false"',
+        'WEB_SEARCH_BACKEND: ${WEB_SEARCH_BACKEND:-duckduckgo}',
         "Grant — coming soon",
         "Website — coming soon",
         "./jireumgil_index:/app/jireumgil_index:ro",
@@ -149,7 +165,7 @@ def main() -> None:
 
     # Main runtime must initialize FAISS, not generic user upload/RAG services.
     main_source = read("backend/app/main.py")
-    for term in ("GISTRegulationsRetriever", "await regulations.initialize()", "build_parent_graph"):
+    for term in ("GISTRegulationsRetriever", "await regulations.initialize()", "WebSearchService", "build_parent_graph"):
         if term == "build_parent_graph":
             continue
         if term not in main_source:

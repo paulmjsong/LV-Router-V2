@@ -47,6 +47,7 @@ async def test_paper_graph_runs_orchestrator_parallel_subagents_validator_and_fi
     services = WorkflowServices(
         llm=llm,
         regulations=SimpleNamespace(),
+        web_search=SimpleNamespace(),
         policy=StageModelPolicy(),
         settings=SimpleNamespace(),
     )

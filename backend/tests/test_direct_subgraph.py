@@ -23,6 +23,7 @@ async def test_direct_subgraph_is_one_answer_call() -> None:
     services = WorkflowServices(
         llm=llm,
         regulations=SimpleNamespace(),
+        web_search=SimpleNamespace(),
         policy=StageModelPolicy(),
         settings=SimpleNamespace(),
     )

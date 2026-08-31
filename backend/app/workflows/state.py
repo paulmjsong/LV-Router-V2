@@ -47,6 +47,11 @@ class RegulationsState(CommonWorkflowState, total=False):
     retrieval_error: str
 
 
+class WebSearchState(CommonWorkflowState, total=False):
+    context: str
+    web_search_error: str
+
+
 class PaperState(CommonWorkflowState, total=False):
     paper_plan: str
     paper_agent_outputs: Annotated[list[dict[str, str]], operator.add]

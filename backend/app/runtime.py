@@ -41,6 +41,12 @@ WORKFLOW_SPECS: dict[WorkflowId, WorkflowSpec] = {
         "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
         _ALL_ROLES,
     ),
+    WorkflowId.WEB_SEARCH: WorkflowSpec(
+        WorkflowId.WEB_SEARCH,
+        "Web Search",
+        "Live DuckDuckGo search followed by a cited answer from retrieved snippets.",
+        _ALL_ROLES,
+    ),
     WorkflowId.PAPER: WorkflowSpec(
         WorkflowId.PAPER,
         "Research Paper Drafting",
@@ -177,6 +183,7 @@ class WorkflowRuntime:
             "call_events": [],
             "context": "",
             "retrieval_error": "",
+            "web_search_error": "",
             "paper_plan": "",
             "paper_agent_outputs": [],
             "paper_draft": "",

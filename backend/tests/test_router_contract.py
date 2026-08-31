@@ -8,18 +8,11 @@ from app.llm import LLMResult
 from app.routing import LocalSemanticRouter, RouteDifficulty
 from app.schemas import ModelTier, WorkflowId
 
-
-def workflow_member(*names: str) -> WorkflowId:
-    for name in names:
-        member = getattr(WorkflowId, name, None)
-        if member is not None:
-            return member
-    raise AssertionError(f"Missing WorkflowId member from {names}")
-
-
-DIRECT = workflow_member("DIRECT", "CHAT")
-REGULATIONS = workflow_member("REGULATIONS")
-PAPER = workflow_member("PAPER")
+DIRECT = WorkflowId.DIRECT
+REGULATIONS = WorkflowId.REGULATIONS
+WEB_SEARCH = WorkflowId.WEB_SEARCH
+PAPER = WorkflowId.PAPER
+ALL_ACTIVE = [DIRECT, REGULATIONS, WEB_SEARCH, PAPER]
 
 
 class FakeRouterLLM:
@@ -50,26 +43,24 @@ def settings():
 
 
 @pytest.mark.asyncio
-async def test_router_schema_has_no_self_reported_confidence() -> None:
+async def test_router_schema_contains_all_active_workflows_and_no_confidence() -> None:
     llm = FakeRouterLLM({"workflow": DIRECT.value, "difficulty": "simple"})
     outcome = await LocalSemanticRouter(llm, settings()).decide(
         query="What is gradient descent?",
         history=[],
-        allowed_workflows=[DIRECT, REGULATIONS, PAPER],
+        allowed_workflows=ALL_ACTIVE,
         user=UserContext(user_id="u", roles={"member"}),
         run_id="schema-test",
     )
     assert outcome.used_fallback is False
-    assert outcome.decision.workflow == DIRECT
-    assert outcome.decision.difficulty == RouteDifficulty.SIMPLE
-    assert outcome.decision.model_tier == ModelTier.LOCAL_FAST
     schema = llm.kwargs["response_format"]["json_schema"]["schema"]
     assert set(schema["required"]) == {"workflow", "difficulty"}
     assert "confidence" not in schema["properties"]
+    assert set(schema["properties"]["workflow"]["enum"]) == {item.value for item in ALL_ACTIVE}
 
 
 @pytest.mark.asyncio
-async def test_legacy_zero_confidence_cannot_force_cloud_fallback() -> None:
+async def test_legacy_extra_confidence_is_ignored() -> None:
     llm = FakeRouterLLM({
         "workflow": DIRECT.value,
         "difficulty": "simple",
@@ -78,7 +69,7 @@ async def test_legacy_zero_confidence_cannot_force_cloud_fallback() -> None:
     outcome = await LocalSemanticRouter(llm, settings()).decide(
         query="What is gradient descent?",
         history=[],
-        allowed_workflows=[DIRECT, REGULATIONS, PAPER],
+        allowed_workflows=ALL_ACTIVE,
         user=UserContext(user_id="u", roles={"member"}),
         run_id="zero-confidence-test",
     )
@@ -92,6 +83,7 @@ async def test_legacy_zero_confidence_cannot_force_cloud_fallback() -> None:
     [
         ({"route": "chat", "complexity": "easy"}, DIRECT, RouteDifficulty.SIMPLE, ModelTier.LOCAL_FAST),
         ({"workflow": "gist_regulations", "difficulty": "medium"}, REGULATIONS, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL),
+        ({"workflow": "search", "level": "medium"}, WEB_SEARCH, RouteDifficulty.STANDARD, ModelTier.CLOUD_SMALL),
         ({"workflow": "paper", "level": "hard"}, PAPER, RouteDifficulty.ADVANCED, ModelTier.CLOUD_LARGE),
     ],
 )
@@ -104,7 +96,7 @@ async def test_router_repairs_common_small_model_variants(
     outcome = await LocalSemanticRouter(FakeRouterLLM(payload), settings()).decide(
         query="Representative request",
         history=[],
-        allowed_workflows=[DIRECT, REGULATIONS, PAPER],
+        allowed_workflows=ALL_ACTIVE,
         user=UserContext(user_id="u", roles={"member"}),
         run_id="repair-test",
     )

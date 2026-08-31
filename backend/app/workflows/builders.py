@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
@@ -12,7 +13,8 @@ from ..config import Settings
 from ..gist_regulations import GISTRegulationsRetriever
 from ..llm import LLMGateway
 from ..routing import StageModelPolicy
-from ..schemas import ModelTier, Quality, WorkflowId
+from ..web_search import WebSearchError, WebSearchService
+from ..schemas import ModelTier, Quality, SourceCitation, WorkflowId
 from .prompts import (
     DIRECT_SYSTEM,
     PAPER_CONTENT_AGENT_SYSTEM,
@@ -22,14 +24,19 @@ from .prompts import (
     PAPER_STRUCTURE_AGENT_SYSTEM,
     PAPER_VALIDATOR_SYSTEM,
     REGULATIONS_SYSTEM,
+    WEB_SEARCH_SYSTEM,
 )
-from .state import DirectState, PaperState, RegulationsState
+from .state import DirectState, PaperState, RegulationsState, WebSearchState
+
+
+logger = logging.getLogger("infonet.workflows")
 
 
 @dataclass(slots=True)
 class WorkflowServices:
     llm: LLMGateway
     regulations: GISTRegulationsRetriever
+    web_search: WebSearchService
     policy: StageModelPolicy
     settings: Settings
 
@@ -38,6 +45,7 @@ class WorkflowServices:
 class WorkflowSubgraphs:
     direct: Any
     regulations: Any
+    web_search: Any
     paper: Any
 
 
@@ -123,28 +131,6 @@ def _event(state: dict[str, Any], alias: str, stage: str) -> list[dict[str, str]
     return [{"run_id": state["run_id"], "alias": alias, "stage": stage}]
 
 
-async def _emit_workflow_step(
-    state: dict[str, Any],
-    services: WorkflowServices,
-    *,
-    step: int,
-    total: int,
-    title: str,
-    detail: str,
-    alias: str,
-) -> None:
-    """Emit a compact, user-visible workflow progress line during SSE streaming."""
-    await services.llm.emit_control(
-        run_id=state["run_id"],
-        content=(
-            f"> **Workflow step {step}/{total} — {title}:** "
-            f"{detail}\n\n"
-        ),
-        event_type="workflow_step",
-        requested_alias=alias,
-    )
-
-
 def _answer(answer: str) -> dict[str, Any]:
     return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
@@ -173,15 +159,6 @@ def build_direct_subgraph(services: WorkflowServices):
 
 def build_regulations_subgraph(services: WorkflowServices):
     async def retrieve(state: RegulationsState) -> RegulationsState:
-        await _emit_workflow_step(
-            state,
-            services,
-            step=1,
-            total=2,
-            title="Regulation retrieval",
-            detail="searching the GIST regulations vectorstore",
-            alias=services.settings.embedding_model_alias,
-        )
         sources = await services.regulations.retrieve(
             query=state["query"],
             user=_user(state),
@@ -198,25 +175,7 @@ def build_regulations_subgraph(services: WorkflowServices):
     async def answer(state: RegulationsState) -> RegulationsState:
         alias = _stage_alias(state, services, "answer")
         if not state.get("context"):
-            await _emit_workflow_step(
-                state,
-                services,
-                step=2,
-                total=2,
-                title="Grounding check",
-                detail="no relevant regulation passage was found",
-                alias=alias,
-            )
             return _answer(state.get("retrieval_error", "No GIST regulation evidence was found."))
-        await _emit_workflow_step(
-            state,
-            services,
-            step=2,
-            total=2,
-            title="Grounded answer",
-            detail="writing the answer from the retrieved regulation passages",
-            alias=alias,
-        )
         prompt = f"{_request_with_history(state)}\n\nGIST REGULATION EVIDENCE:\n{state['context']}"
         result = await services.llm.chat(
             user=_user(state),
@@ -242,18 +201,79 @@ def build_regulations_subgraph(services: WorkflowServices):
     return graph.compile()
 
 
+def build_web_search_subgraph(services: WorkflowServices):
+    async def search(state: WebSearchState) -> WebSearchState:
+        try:
+            sources = await services.web_search.search(state["query"])
+        except WebSearchError as exc:
+            logger.warning("Web search failed for run=%s: %s", state["run_id"], exc)
+            return {
+                "context": "",
+                "sources": [],
+                "web_search_error": "Live web search is temporarily unavailable.",
+            }
+
+        context = services.web_search.context_from_sources(sources)
+        return {
+            "context": context,
+            "sources": [source.model_dump(mode="json") for source in sources],
+            "web_search_error": "" if context else "No usable live search results were returned.",
+        }
+
+    async def answer(state: WebSearchState) -> WebSearchState:
+        source_items = [
+            SourceCitation.model_validate(item)
+            for item in state.get("sources", [])
+        ]
+        if not state.get("context"):
+            return _answer(state.get("web_search_error", "No live search evidence was found."))
+
+        alias = _stage_alias(state, services, "answer")
+        prompt = (
+            f"{_request_with_history(state)}\n\n"
+            "LIVE WEB SEARCH SNIPPETS (UNTRUSTED EVIDENCE):\n"
+            f"{state['context']}"
+        )
+        result = await services.llm.chat(
+            user=_user(state),
+            model_alias=alias,
+            messages=[
+                {"role": "system", "content": WEB_SEARCH_SYSTEM},
+                {"role": "user", "content": prompt},
+            ],
+            run_id=state["run_id"],
+            workflow_id=WorkflowId.WEB_SEARCH.value,
+            stage="answer",
+            temperature=0.1,
+            max_tokens=2200,
+        )
+        sources_markdown = services.web_search.sources_markdown(source_items)
+        if sources_markdown:
+            await services.llm.emit_control(
+                run_id=state["run_id"],
+                content=sources_markdown,
+                event_type="sources",
+                requested_alias=alias,
+                served_model=result.served_model,
+            )
+        full_answer = f"{result.content.rstrip()}{sources_markdown}"
+        return {
+            **_answer(full_answer),
+            "call_events": _event(state, alias, "answer"),
+        }
+
+    graph = StateGraph(WebSearchState)
+    graph.add_node("search", search)
+    graph.add_node("answer", answer)
+    graph.add_edge(START, "search")
+    graph.add_edge("search", "answer")
+    graph.add_edge("answer", END)
+    return graph.compile()
+
+
 def build_paper_subgraph(services: WorkflowServices):
     async def orchestrator(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "orchestrator")
-        await _emit_workflow_step(
-            state,
-            services,
-            step=1,
-            total=5,
-            title="Orchestrator",
-            detail="turning the request into a drafting plan",
-            alias=alias,
-        )
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -273,15 +293,6 @@ def build_paper_subgraph(services: WorkflowServices):
             plan_text = plan.model_dump_json(indent=2)
         except Exception:
             plan_text = result.content
-        await _emit_workflow_step(
-            state,
-            services,
-            step=2,
-            total=5,
-            title="Specialist analysis",
-            detail="running the content and structure agents in parallel",
-            alias=alias,
-        )
         return {"paper_plan": plan_text, "call_events": _event(state, alias, "orchestrator")}
 
     async def content_agent(state: PaperState) -> PaperState:
@@ -326,15 +337,6 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def drafter(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "draft")
-        await _emit_workflow_step(
-            state,
-            services,
-            step=3,
-            total=5,
-            title="Drafter",
-            detail="synthesizing the plan and both specialist outputs",
-            alias=alias,
-        )
         outputs = "\n\n".join(
             f"[{item['agent'].upper()} AGENT]\n{item['output']}"
             for item in state.get("paper_agent_outputs", [])
@@ -363,15 +365,6 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def validator(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "validator")
-        await _emit_workflow_step(
-            state,
-            services,
-            step=4,
-            total=5,
-            title="Validator",
-            detail="checking requested coverage and unsupported claims",
-            alias=alias,
-        )
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -401,15 +394,6 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def final(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "final")
-        await _emit_workflow_step(
-            state,
-            services,
-            step=5,
-            total=5,
-            title="Finalizer",
-            detail="revising the draft and preparing the final response",
-            alias=alias,
-        )
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -452,5 +436,6 @@ def build_workflow_subgraphs(services: WorkflowServices) -> WorkflowSubgraphs:
     return WorkflowSubgraphs(
         direct=build_direct_subgraph(services),
         regulations=build_regulations_subgraph(services),
+        web_search=build_web_search_subgraph(services),
         paper=build_paper_subgraph(services),
     )

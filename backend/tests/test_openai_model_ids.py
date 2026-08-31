@@ -6,5 +6,6 @@ def test_openwebui_exposes_only_active_modes() -> None:
         "auto",
         "direct",
         "gist-regulations",
+        "web-search",
         "research-paper",
     ]

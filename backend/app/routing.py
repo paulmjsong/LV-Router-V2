@@ -21,6 +21,8 @@ The user message supplies allowed_workflows. Select exactly one value from that 
 Intent rules:
 - General questions, explanations, rewriting, translation, coding, calculations, and planning use the direct workflow.
 - GIST rules, graduation, degree requirements, academic policy, and institutional regulations use the GIST regulations workflow.
+- Requests that explicitly ask to search, browse, look up, or verify online use the web-search workflow.
+- Questions requiring current or live information—such as news, current officeholders, prices, schedules, releases, laws, or recent events—use the web-search workflow.
 - Drafting, revising, structuring, or reviewing research-paper text uses the research-paper workflow.
 
 Difficulty values:
@@ -116,6 +118,10 @@ class LocalSemanticRouter:
         return cls._workflow_member("REGULATIONS")
 
     @classmethod
+    def _web_search_workflow(cls) -> WorkflowId:
+        return cls._workflow_member("WEB_SEARCH")
+
+    @classmethod
     def _paper_workflow(cls) -> WorkflowId:
         return cls._workflow_member("PAPER")
 
@@ -124,6 +130,7 @@ class LocalSemanticRouter:
         return (
             cls._direct_workflow(),
             cls._regulations_workflow(),
+            cls._web_search_workflow(),
             cls._paper_workflow(),
         )
 
@@ -153,6 +160,7 @@ class LocalSemanticRouter:
     def _workflow_aliases(cls) -> dict[str, str]:
         direct = cls._direct_workflow().value
         regulations = cls._regulations_workflow().value
+        web_search = cls._web_search_workflow().value
         paper = cls._paper_workflow().value
         return {
             "direct": direct,
@@ -166,6 +174,12 @@ class LocalSemanticRouter:
             "regulation": regulations,
             "gist-rules": regulations,
             "jireumgil": regulations,
+            "web-search": web_search,
+            "web": web_search,
+            "search": web_search,
+            "online-search": web_search,
+            "internet-search": web_search,
+            "browse-web": web_search,
             "research-paper": paper,
             "research-paper-drafting": paper,
             "paper": paper,
@@ -386,7 +400,7 @@ class StageModelPolicy:
         ModelTier.CLOUD_LARGE: 2,
     }
     _BY_ORDER = {value: key for key, value in _ORDER.items()}
-    _SPECIALIST = {WorkflowId.REGULATIONS, WorkflowId.PAPER}
+    _SPECIALIST = {WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER}
 
     @classmethod
     def explicit_tier(cls, quality: Quality) -> ModelTier:
