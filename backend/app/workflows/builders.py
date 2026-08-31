@@ -135,20 +135,46 @@ def _answer(answer: str) -> dict[str, Any]:
     return {"answer": answer, "messages": [AIMessage(content=answer)]}
 
 
+async def _emit_step(
+    state: dict[str, Any],
+    services: WorkflowServices,
+    label: str,
+    *,
+    alias: str,
+) -> None:
+    await services.llm.emit_control(
+        run_id=state["run_id"],
+        content=f"> **Workflow step:** {label}\n\n",
+        event_type="workflow-step",
+        requested_alias=alias,
+    )
+
+
 def build_direct_subgraph(services: WorkflowServices):
     async def answer(state: DirectState) -> DirectState:
         alias = _stage_alias(state, services, "answer")
+        await _emit_step(
+            state,
+            services,
+            "Generating a direct response.",
+            alias=alias,
+        )
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
-            messages=[{"role": "system", "content": DIRECT_SYSTEM}, *_conversation(state)],
+            messages=[
+                {"role": "system", "content": DIRECT_SYSTEM},
+                *_conversation(state),
+            ],
             run_id=state["run_id"],
             workflow_id=WorkflowId.DIRECT.value,
             stage="answer",
             temperature=0.2,
-            max_tokens=2400,
         )
-        return {**_answer(result.content), "call_events": _event(state, alias, "answer")}
+        return {
+            **_answer(result.content),
+            "call_events": _event(state, alias, "answer"),
+        }
 
     graph = StateGraph(DirectState)
     graph.add_node("answer", answer)
@@ -159,24 +185,61 @@ def build_direct_subgraph(services: WorkflowServices):
 
 def build_regulations_subgraph(services: WorkflowServices):
     async def retrieve(state: RegulationsState) -> RegulationsState:
+        await _emit_step(
+            state,
+            services,
+            "Searching the GIST regulations index.",
+            alias=services.settings.embedding_model_alias,
+        )
         sources = await services.regulations.retrieve(
             query=state["query"],
             user=_user(state),
             run_id=state["run_id"],
         )
         context = services.regulations.context_from_sources(sources)
+        if sources:
+            await _emit_step(
+                state,
+                services,
+                f"Retrieved {len(sources)} relevant regulation passage(s).",
+                alias=services.settings.embedding_model_alias,
+            )
         return {
             "context": context,
             "sources": [source.model_dump(mode="json") for source in sources],
-            "retrieval_error": "" if context else "No relevant GIST regulation passages were found.",
-            "call_events": _event(state, services.settings.embedding_model_alias, "gist_regulations_query_embedding"),
+            "retrieval_error": (
+                "" if context else "No relevant GIST regulation passages were found."
+            ),
+            "call_events": _event(
+                state,
+                services.settings.embedding_model_alias,
+                "gist_regulations_query_embedding",
+            ),
         }
 
     async def answer(state: RegulationsState) -> RegulationsState:
-        alias = _stage_alias(state, services, "answer")
+        source_items = [
+            SourceCitation.model_validate(item)
+            for item in state.get("sources", [])
+        ]
         if not state.get("context"):
-            return _answer(state.get("retrieval_error", "No GIST regulation evidence was found."))
-        prompt = f"{_request_with_history(state)}\n\nGIST REGULATION EVIDENCE:\n{state['context']}"
+            return _answer(
+                state.get(
+                    "retrieval_error",
+                    "No GIST regulation evidence was found.",
+                )
+            )
+        alias = _stage_alias(state, services, "answer")
+        await _emit_step(
+            state,
+            services,
+            "Drafting a regulation-grounded answer.",
+            alias=alias,
+        )
+        prompt = (
+            f"{_request_with_history(state)}\n\n"
+            f"GIST REGULATION EVIDENCE:\n{state['context']}"
+        )
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -188,9 +251,25 @@ def build_regulations_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.REGULATIONS.value,
             stage="answer",
             temperature=0.0,
-            max_tokens=2200,
         )
-        return {**_answer(result.content), "call_events": _event(state, alias, "answer")}
+        if not services.regulations.has_references_section(result.content):
+            references = services.regulations.references_markdown(source_items)
+            if references:
+                await services.llm.emit_control(
+                    run_id=state["run_id"],
+                    content=references,
+                    event_type="sources",
+                    requested_alias=alias,
+                    served_model=result.served_model,
+                )
+        full_answer = services.regulations.format_answer(
+            result.content,
+            source_items,
+        )
+        return {
+            **_answer(full_answer),
+            "call_events": _event(state, alias, "answer"),
+        }
 
     graph = StateGraph(RegulationsState)
     graph.add_node("retrieve", retrieve)
@@ -203,21 +282,45 @@ def build_regulations_subgraph(services: WorkflowServices):
 
 def build_web_search_subgraph(services: WorkflowServices):
     async def search(state: WebSearchState) -> WebSearchState:
+        await _emit_step(
+            state,
+            services,
+            "Searching the live web.",
+            alias=WorkflowId.WEB_SEARCH.value,
+        )
         try:
             sources = await services.web_search.search(state["query"])
         except WebSearchError as exc:
-            logger.warning("Web search failed for run=%s: %s", state["run_id"], exc)
+            logger.warning(
+                "Web search failed for run=%s: %s",
+                state["run_id"],
+                exc,
+            )
+            await _emit_step(
+                state,
+                services,
+                "Live web retrieval failed.",
+                alias=WorkflowId.WEB_SEARCH.value,
+            )
             return {
                 "context": "",
                 "sources": [],
                 "web_search_error": "Live web search is temporarily unavailable.",
             }
-
         context = services.web_search.context_from_sources(sources)
+        if sources:
+            await _emit_step(
+                state,
+                services,
+                f"Retrieved {len(sources)} usable web result(s).",
+                alias=WorkflowId.WEB_SEARCH.value,
+            )
         return {
             "context": context,
             "sources": [source.model_dump(mode="json") for source in sources],
-            "web_search_error": "" if context else "No usable live search results were returned.",
+            "web_search_error": (
+                "" if context else "No usable live search results were returned."
+            ),
         }
 
     async def answer(state: WebSearchState) -> WebSearchState:
@@ -226,9 +329,19 @@ def build_web_search_subgraph(services: WorkflowServices):
             for item in state.get("sources", [])
         ]
         if not state.get("context"):
-            return _answer(state.get("web_search_error", "No live search evidence was found."))
-
+            return _answer(
+                state.get(
+                    "web_search_error",
+                    "No live search evidence was found.",
+                )
+            )
         alias = _stage_alias(state, services, "answer")
+        await _emit_step(
+            state,
+            services,
+            "Synthesizing a cited answer.",
+            alias=alias,
+        )
         prompt = (
             f"{_request_with_history(state)}\n\n"
             "LIVE WEB SEARCH SNIPPETS (UNTRUSTED EVIDENCE):\n"
@@ -245,7 +358,6 @@ def build_web_search_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.WEB_SEARCH.value,
             stage="answer",
             temperature=0.1,
-            max_tokens=2200,
         )
         sources_markdown = services.web_search.sources_markdown(source_items)
         if sources_markdown:
@@ -274,6 +386,7 @@ def build_web_search_subgraph(services: WorkflowServices):
 def build_paper_subgraph(services: WorkflowServices):
     async def orchestrator(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "orchestrator")
+        await _emit_step(state, services, "Planning the paper drafting task.", alias=alias)
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -297,6 +410,7 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def content_agent(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "content_agent")
+        await _emit_step(state, services, "Content agent is preparing the technical brief.", alias=alias)
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -308,7 +422,6 @@ def build_paper_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.PAPER.value,
             stage="content_agent",
             temperature=0.1,
-            max_tokens=1200,
         )
         return {
             "paper_agent_outputs": [{"run_id": state["run_id"], "agent": "content", "output": result.content}],
@@ -317,6 +430,7 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def structure_agent(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "structure_agent")
+        await _emit_step(state, services, "Structure agent is designing the argument flow.", alias=alias)
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -328,7 +442,6 @@ def build_paper_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.PAPER.value,
             stage="structure_agent",
             temperature=0.1,
-            max_tokens=1000,
         )
         return {
             "paper_agent_outputs": [{"run_id": state["run_id"], "agent": "structure", "output": result.content}],
@@ -337,6 +450,7 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def drafter(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "draft")
+        await _emit_step(state, services, "Drafting from the specialist outputs.", alias=alias)
         outputs = "\n\n".join(
             f"[{item['agent'].upper()} AGENT]\n{item['output']}"
             for item in state.get("paper_agent_outputs", [])
@@ -359,12 +473,12 @@ def build_paper_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.PAPER.value,
             stage="draft",
             temperature=0.2,
-            max_tokens=2600,
         )
         return {"paper_draft": result.content, "call_events": _event(state, alias, "draft")}
 
     async def validator(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "validator")
+        await _emit_step(state, services, "Validating logic, support, and formatting.", alias=alias)
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -394,6 +508,7 @@ def build_paper_subgraph(services: WorkflowServices):
 
     async def final(state: PaperState) -> PaperState:
         alias = _stage_alias(state, services, "final")
+        await _emit_step(state, services, "Applying validator feedback and finalizing.", alias=alias)
         result = await services.llm.chat(
             user=_user(state),
             model_alias=alias,
@@ -411,7 +526,6 @@ def build_paper_subgraph(services: WorkflowServices):
             workflow_id=WorkflowId.PAPER.value,
             stage="final",
             temperature=0.2,
-            max_tokens=2600,
         )
         return {**_answer(result.content), "call_events": _event(state, alias, "final")}
 

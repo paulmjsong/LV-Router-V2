@@ -267,14 +267,15 @@ services:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
       OPENAI_API_CONFIGS: >-
-        {"0":{"enable":true,"model_ids":["auto","direct","gist-regulations","web-search","research-paper"]}}
+        {"0":{"enable":true,"connection_type":"local","model_ids":["auto","direct","web-search","gist-regulations","research-paper"]}}
       DEFAULT_MODELS: "auto"
+      MODEL_ORDER_LIST: '["auto","direct","web-search","gist-regulations","research-paper"]'
       USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"
       USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
       ENABLE_WEB_SEARCH: "false"
       USER_PERMISSIONS_FEATURES_WEB_SEARCH: "false"
       WEBUI_BANNERS: >-
-        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · GIST Regulations · Web Search · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
+        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · Web Search · GIST Regulations · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
       ENABLE_NOTES: "false"
       ENABLE_CALENDAR: "false"
       ENABLE_AUTOMATIONS: "false"
@@ -293,6 +294,7 @@ services:
       ENABLE_DIRECT_CONNECTIONS: "false"
     volumes:
       - open-webui-data:/app/backend/data
+      - ./jireumgil_index/pdfs:/app/backend/open_webui/static/gist-regulations:ro
     depends_on:
       backend:
         condition: service_healthy

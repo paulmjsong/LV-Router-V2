@@ -145,7 +145,7 @@ def main() -> None:
     compose = read("docker-compose.yml")
     required_compose = (
         'WEBUI_NAME: ${WEBUI_NAME:-Infonet AI Router}',
-        '"auto","direct","gist-regulations","web-search","research-paper"',
+        '"auto","direct","web-search","gist-regulations","research-paper"',
         'DEFAULT_MODELS: "auto"',
         'USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"',
         'USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"',
@@ -190,6 +190,76 @@ def main() -> None:
     if present:
         fail(f"Old branding/workflow identifiers remain: {present}")
 
+    # v0.6: user-facing route metadata, workflow steps, linked PDFs, and no
+    # application-level ceilings on generated answers.
+    compat_tree = ast.parse(compat)
+    descriptions = next(
+        node
+        for node in compat_tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign))
+        and (
+            (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == "MODEL_DESCRIPTIONS"
+            )
+            or (
+                isinstance(node, ast.Assign)
+                and any(
+                    isinstance(target, ast.Name)
+                    and target.id == "MODEL_DESCRIPTIONS"
+                    for target in node.targets
+                )
+            )
+        )
+    )
+    description_source = ast.get_source_segment(compat, descriptions) or ""
+    for label in (
+        "Automatic Routing",
+        "Direct Response",
+        "Web Search",
+        "GIST Regulations",
+        "Research Paper Drafting",
+    ):
+        if label not in description_source:
+            fail(f"Missing friendly Open WebUI route label: {label}")
+
+    for term in (
+        '"connection_type":"local"',
+        "MODEL_ORDER_LIST:",
+        "./jireumgil_index/pdfs:/app/backend/open_webui/static/gist-regulations:ro",
+    ):
+        if term not in compose:
+            fail(f"Open WebUI route/PDF configuration missing: {term}")
+
+    pdf_dir = ROOT / "jireumgil_index" / "pdfs"
+    if not pdf_dir.is_dir() or not any(pdf_dir.glob("*.pdf")):
+        fail(f"Missing GIST regulation PDFs: {pdf_dir}")
+
+    for term in (
+        "/static/gist-regulations/",
+        "references_markdown",
+        "Citation:",
+        "#page=",
+    ):
+        if term not in gist:
+            fail(f"GIST citation/PDF-link implementation missing: {term}")
+
+    if "_emit_step" not in web_source:
+        fail("Web-search subgraph does not emit workflow steps")
+    if "_emit_step" not in paper_source:
+        fail("Research-paper subgraph does not emit workflow steps")
+
+    for token_cap in (
+        "max_tokens=2400",
+        "max_tokens=2200",
+        "max_tokens=2600",
+    ):
+        if token_cap in builders_text:
+            fail(
+                "User-facing application-level answer token ceiling remains: "
+                f"{token_cap}"
+            )
     print("STATIC_INVARIANTS_PASS")
 
 

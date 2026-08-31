@@ -24,15 +24,15 @@ router = APIRouter(prefix="/v1", tags=["OpenAI compatibility"])
 MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
     "auto": WorkflowId.AUTO,
     "direct": WorkflowId.DIRECT,
-    "gist-regulations": WorkflowId.REGULATIONS,
     "web-search": WorkflowId.WEB_SEARCH,
+    "gist-regulations": WorkflowId.REGULATIONS,
     "research-paper": WorkflowId.PAPER,
 }
 MODEL_DESCRIPTIONS: dict[str, str] = {
-    "auto": "Auto",
-    "direct": "Direct",
-    "gist-regulations": "GIST Regulations",
+    "auto": "Automatic Routing",
+    "direct": "Direct Response",
     "web-search": "Web Search",
+    "gist-regulations": "GIST Regulations",
     "research-paper": "Research Paper Drafting",
 }
 
@@ -159,20 +159,32 @@ def _chunk(completion_id: str, model: str, content: str, finish_reason: str | No
 def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserContext, completion_id: str):
     async def generate():
         queue: asyncio.Queue[LLMStreamChunk | Exception | None] = asyncio.Queue()
+        served_model_seen = False
 
         async def sink(chunk: LLMStreamChunk) -> None:
             await queue.put(chunk)
 
         async def run() -> None:
             try:
-                response = await _execute_request(payload=payload, request=request, user=user, token_sink=sink)
-                await queue.put(LLMStreamChunk(
-                    content="",
-                    requested_alias=(response.model_tiers[-1] if response.model_tiers else payload.model),
-                    served_model=payload.model,
-                    finish_reason="stop",
-                    event_type="complete",
-                ))
+                response = await _execute_request(
+                    payload=payload,
+                    request=request,
+                    user=user,
+                    token_sink=sink,
+                )
+                await queue.put(
+                    LLMStreamChunk(
+                        content="",
+                        requested_alias=(
+                            response.model_tiers[-1]
+                            if response.model_tiers
+                            else payload.model
+                        ),
+                        served_model=payload.model,
+                        finish_reason="stop",
+                        event_type="complete",
+                    )
+                )
             except Exception as exc:
                 await queue.put(exc)
             finally:
@@ -180,7 +192,7 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
 
         task = asyncio.create_task(run())
         try:
-            yield _chunk(completion_id, payload.model, "")
+            yield _chunk(completion_id, payload.model, "> **Status:** routing request…\n\n")
             while True:
                 try:
                     item = await asyncio.wait_for(queue.get(), timeout=15)
@@ -190,22 +202,68 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                 if item is None:
                     break
                 if isinstance(item, Exception):
-                    message = "The request failed."
+                    logger.error(
+                        "Streaming request failed: %s",
+                        item,
+                        exc_info=(type(item), item, item.__traceback__),
+                    )
+                    message = "The request failed. Check the backend logs."
                     if isinstance(item, APITimeoutError):
                         message = "The selected model timed out."
-                    yield _chunk(completion_id, payload.model, f"\n\n> **Error:** {message}\n")
+                    yield _chunk(
+                        completion_id,
+                        payload.model,
+                        f"\n\n> **Error:** {message}\n",
+                    )
+                    yield _chunk(
+                        completion_id,
+                        payload.model,
+                        "",
+                        finish_reason="stop",
+                    )
                     break
                 if item.event_type == "complete":
-                    yield _chunk(completion_id, payload.model, "", finish_reason="stop")
+                    yield _chunk(
+                        completion_id,
+                        payload.model,
+                        "",
+                        finish_reason="stop",
+                    )
                     break
+                # Control events such as route and workflow-step may arrive before
+                # the actual answer. Do not mislabel those as the served answer model.
+                if (
+                    item.event_type == "token"
+                    and item.served_model
+                    and not served_model_seen
+                ):
+                    served_model_seen = True
+                    yield _chunk(
+                        completion_id,
+                        payload.model,
+                        f"> **Served model:** `{item.served_model}`\n\n",
+                    )
                 if item.content:
-                    yield _chunk(completion_id, item.served_model or payload.model, item.content)
+                    yield _chunk(
+                        completion_id,
+                        item.served_model or payload.model,
+                        item.content,
+                    )
             yield b"data: [DONE]\n\n"
         finally:
             if not task.done():
                 task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-    return StreamingResponse(generate(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/models")

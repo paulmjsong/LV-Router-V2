@@ -35,16 +35,16 @@ WORKFLOW_SPECS: dict[WorkflowId, WorkflowSpec] = {
         "General questions and direct model inference.",
         _ALL_ROLES,
     ),
-    WorkflowId.REGULATIONS: WorkflowSpec(
-        WorkflowId.REGULATIONS,
-        "GIST Regulations",
-        "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
-        _ALL_ROLES,
-    ),
     WorkflowId.WEB_SEARCH: WorkflowSpec(
         WorkflowId.WEB_SEARCH,
         "Web Search",
         "Live DuckDuckGo search followed by a cited answer from retrieved snippets.",
+        _ALL_ROLES,
+    ),
+    WorkflowId.REGULATIONS: WorkflowSpec(
+        WorkflowId.REGULATIONS,
+        "GIST Regulations",
+        "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
         _ALL_ROLES,
     ),
     WorkflowId.PAPER: WorkflowSpec(

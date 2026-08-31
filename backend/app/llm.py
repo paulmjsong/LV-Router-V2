@@ -100,7 +100,13 @@ class LLMGateway:
             self._clients[api_key] = client
         return client
 
-    def _effective_max_tokens(self, model_alias: str, requested: int) -> int:
+    def _effective_max_tokens(
+        self,
+        model_alias: str,
+        requested: int | None,
+    ) -> int | None:
+        if requested is None:
+            return None
         if model_alias == self.settings.local_router_model_alias:
             return min(requested, self.settings.local_router_max_tokens)
         if model_alias == "local-fast":
@@ -158,7 +164,7 @@ class LLMGateway:
         workflow_id: str,
         stage: str,
         temperature: float,
-        max_tokens: int,
+        max_tokens: int | None,
         response_format: dict[str, Any] | None,
         stream: bool,
     ) -> dict[str, Any]:
@@ -170,19 +176,18 @@ class LLMGateway:
                 "team_id": user.team_id or "",
             }
         }
-        # Ollama may expose a separate reasoning stream for thinking models.
-        # Disable it for the local control and local answer aliases.
         if model_alias in {"local-router", "local-fast"}:
             extra_body["think"] = False
         kwargs: dict[str, Any] = {
             "model": model_alias,
             "messages": list(messages),
             "temperature": temperature,
-            "max_tokens": max_tokens,
             "user": user.user_id,
             "stream": stream,
             "extra_body": extra_body,
         }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
         if stream:
             kwargs["stream_options"] = {"include_usage": True}
         if response_format is not None:
@@ -199,7 +204,7 @@ class LLMGateway:
         workflow_id: str,
         stage: str,
         temperature: float,
-        max_tokens: int,
+        max_tokens: int | None,
         response_format: dict[str, Any] | None,
         sink: StreamSink,
     ) -> LLMResult:
@@ -217,20 +222,27 @@ class LLMGateway:
                 stream=True,
             )
         )
-
         parts: list[str] = []
         served_model = model_alias
         prompt_tokens: int | None = None
         completion_tokens: int | None = None
         reasoning_notice_sent = False
-
         async for chunk in stream:
-            served_model = str(getattr(chunk, "model", served_model) or served_model)
+            served_model = str(
+                getattr(chunk, "model", served_model) or served_model
+            )
             usage = getattr(chunk, "usage", None)
             if usage is not None:
-                prompt_tokens = getattr(usage, "prompt_tokens", prompt_tokens)
-                completion_tokens = getattr(usage, "completion_tokens", completion_tokens)
-
+                prompt_tokens = getattr(
+                    usage,
+                    "prompt_tokens",
+                    prompt_tokens,
+                )
+                completion_tokens = getattr(
+                    usage,
+                    "completion_tokens",
+                    completion_tokens,
+                )
             choices = getattr(chunk, "choices", None) or []
             if not choices:
                 continue
@@ -246,11 +258,17 @@ class LLMGateway:
                 )
             if text:
                 parts.append(text)
-            elif isinstance(reasoning, str) and reasoning and not reasoning_notice_sent:
+            elif (
+                isinstance(reasoning, str)
+                and reasoning
+                and not reasoning_notice_sent
+            ):
                 reasoning_notice_sent = True
                 await sink(
                     LLMStreamChunk(
-                        content="> **Model status:** hidden reasoning suppressed.\n\n",
+                        content=(
+                            "> **Model status:** hidden reasoning suppressed.\n\n"
+                        ),
                         requested_alias=model_alias,
                         served_model=served_model,
                     )
@@ -263,7 +281,6 @@ class LLMGateway:
                     finish_reason=getattr(choice, "finish_reason", None),
                 )
             )
-
         return LLMResult(
             content="".join(parts).strip(),
             requested_alias=model_alias,
@@ -282,19 +299,21 @@ class LLMGateway:
         workflow_id: str,
         stage: str,
         temperature: float = 0.2,
-        max_tokens: int = 1800,
+        max_tokens: int | None = None,
         response_format: dict[str, Any] | None = None,
     ) -> LLMResult:
         max_tokens = self._effective_max_tokens(model_alias, max_tokens)
         registration = self._stream_registrations.get(run_id)
-        stream_this_stage = registration is not None and stage in registration.stages
+        stream_this_stage = (
+            registration is not None and stage in registration.stages
+        )
         logger.info(
-            "LLM call alias=%s workflow=%s stage=%s stream=%s max_tokens=%d",
+            "LLM call alias=%s workflow=%s stage=%s stream=%s max_tokens=%s",
             model_alias,
             workflow_id,
             stage,
             stream_this_stage,
-            max_tokens,
+            max_tokens if max_tokens is not None else "provider-default",
         )
         if stream_this_stage and registration is not None:
             return await self._chat_streamed(
@@ -309,7 +328,6 @@ class LLMGateway:
                 response_format=response_format,
                 sink=registration.sink,
             )
-
         response = await self._client(user).chat.completions.create(
             **self._chat_kwargs(
                 user=user,

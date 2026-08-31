@@ -188,3 +188,21 @@ pytest
 - no active Grant workflow;
 - no active Website workflow;
 - no claim that the research-paper workflow performs autonomous literature search, citation verification, or experiment validation.
+
+
+## GIST regulation citations and PDF links
+
+GIST regulation evidence is retrieved from the supplied FAISS index. Each
+retrieved source is mapped to a controlled Markdown link for the corresponding
+PDF. Open WebUI serves those files under `/static/gist-regulations/`; when page
+metadata exists, the link includes `#page=N` so compatible browser PDF viewers
+open near the retrieved page. The answer prompt requires inline links and a
+`📌 References` section, and the backend appends a deterministic reference list
+if the model omits one.
+
+## Output-length policy
+
+User-facing Direct, Web Search, GIST Regulations, and Research Paper generation
+no longer has an application-level `max_tokens` ceiling. Small structured-control
+calls such as the paper orchestrator and validator remain bounded. Providers and
+models still enforce their own context/output limits.
