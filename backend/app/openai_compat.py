@@ -156,11 +156,32 @@ def _chunk(completion_id: str, model: str, content: str, finish_reason: str | No
     })
 
 
-def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserContext, completion_id: str):
+def _should_replay_completed_answer(
+    answer: str,
+    answer_body_seen: bool,
+) -> bool:
+    """Return True when a workflow completed without streaming its answer body."""
+    return bool(answer.strip()) and not answer_body_seen
+
+
+def _stream_request(
+    *,
+    payload: OpenAIChatRequest,
+    request: Request,
+    user: UserContext,
+    completion_id: str,
+):
     async def generate():
         queue: asyncio.Queue[LLMStreamChunk | Exception | None] = asyncio.Queue()
+        answer_body_seen = False
 
         async def sink(chunk: LLMStreamChunk) -> None:
+            nonlocal answer_body_seen
+            if (
+                chunk.content
+                and chunk.event_type in {"token", "sources", "final-answer"}
+            ):
+                answer_body_seen = True
             await queue.put(chunk)
 
         async def run() -> None:
@@ -171,6 +192,28 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                     user=user,
                     token_sink=sink,
                 )
+
+                if _should_replay_completed_answer(
+                    response.answer,
+                    answer_body_seen,
+                ):
+                    logger.info(
+                        "Emitting non-streamed final answer for workflow=%s",
+                        response.workflow.value,
+                    )
+                    await queue.put(
+                        LLMStreamChunk(
+                            content=response.answer,
+                            requested_alias=(
+                                response.model_tiers[-1]
+                                if response.model_tiers
+                                else payload.model
+                            ),
+                            served_model=payload.model,
+                            event_type="final-answer",
+                        )
+                    )
+
                 await queue.put(
                     LLMStreamChunk(
                         content="",
@@ -199,8 +242,10 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                 except asyncio.TimeoutError:
                     yield b": keep-alive\n\n"
                     continue
+
                 if item is None:
                     break
+
                 if isinstance(item, Exception):
                     logger.error(
                         "Streaming request failed: %s",
@@ -222,6 +267,7 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                         finish_reason="stop",
                     )
                     break
+
                 if item.event_type == "complete":
                     yield _chunk(
                         completion_id,
@@ -230,12 +276,14 @@ def _stream_request(*, payload: OpenAIChatRequest, request: Request, user: UserC
                         finish_reason="stop",
                     )
                     break
+
                 if item.content:
                     yield _chunk(
                         completion_id,
                         item.served_model or payload.model,
                         item.content,
                     )
+
             yield b"data: [DONE]\n\n"
         finally:
             if not task.done():
