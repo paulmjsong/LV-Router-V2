@@ -97,26 +97,9 @@ async def test_invalid_router_falls_back_visibly_to_cloud_small() -> None:
     assert outcome.decision.model_tier == ModelTier.CLOUD_SMALL
 
 
-@pytest.mark.asyncio
-async def test_semantic_router_cannot_select_pdf_without_an_attachment() -> None:
-    llm = FakeRouterLLM({
-        "workflow": WorkflowId.PDF.value,
-        "difficulty": RouteDifficulty.STANDARD.value,
-    })
-    outcome = await LocalSemanticRouter(llm, settings()).decide(
-        query="Summarize a PDF",
-        history=[],
-        allowed_workflows=[*ALL_ACTIVE, WorkflowId.PDF],
-        user=UserContext(user_id="u", roles={"member"}),
-        run_id="run-pdf-guard",
-        has_pdf_attachment=False,
-    )
-    assert outcome.used_fallback is True
-    assert outcome.decision.workflow == WorkflowId.DIRECT
-
 def test_balanced_specialists_have_cloud_small_floor() -> None:
     policy = StageModelPolicy()
-    for workflow in (WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER, WorkflowId.PDF):
+    for workflow in (WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER):
         assert policy.stage_alias(
             workflow=workflow,
             recommended_tier=ModelTier.LOCAL_FAST,

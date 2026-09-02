@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     gist_regulations_top_k: int = Field(default=5, ge=1, le=20)
     gist_regulations_vector_dimensions: int = Field(default=1536, ge=128, le=8192)
     gist_regulations_context_chars: int = Field(default=16000, ge=2000, le=50000)
-    pdf_document_context_chars: int = Field(default=48000, ge=2000, le=200000)
     web_search_max_results: int = Field(default=5, ge=1, le=10)
     web_search_timeout_seconds: float = Field(default=12.0, ge=2.0, le=60.0)
     web_search_region: str = "us-en"

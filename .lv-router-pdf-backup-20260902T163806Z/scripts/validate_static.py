@@ -66,12 +66,12 @@ def main() -> None:
     if "ModelTier.CLOUD_SMALL" not in routing_text or "ModelTier.LOCAL_FAST" not in routing_text:
         fail("Router difficulty-to-tier mapping is missing")
 
-    # Parent graph: one parent with five active child subgraphs.
+    # Parent graph: one parent with four active child subgraphs.
     parent_text = read("backend/app/workflows/parent.py")
-    for term in ("subgraphs.direct", "subgraphs.pdf_document", "subgraphs.regulations", "subgraphs.web_search", "subgraphs.paper"):
+    for term in ("subgraphs.direct", "subgraphs.regulations", "subgraphs.web_search", "subgraphs.paper"):
         if term not in parent_text:
             fail(f"Parent graph is missing active child subgraph {term}")
-    for term in ("subgraphs.grant", "subgraphs.website"):
+    for term in ("subgraphs.pdf", "subgraphs.grant", "subgraphs.website"):
         if term in parent_text:
             fail(f"Inactive child subgraph remains in parent graph: {term}")
     if "build_parent_graph" not in read("backend/app/runtime.py"):
@@ -86,12 +86,6 @@ def main() -> None:
     ]
     if len(direct_calls) != 1:
         fail(f"Direct subgraph must contain exactly one answer LLM call, found {len(direct_calls)}")
-
-    pdf_document = function(builders, None, "build_pdf_document_subgraph")
-    pdf_document_source = ast.get_source_segment(builders_text, pdf_document) or ""
-    for term in ("PDF_DOCUMENT_SYSTEM", "document_context", "WorkflowId.PDF", "services.llm.chat"):
-        if term not in pdf_document_source:
-            fail(f"PDF document subgraph is incomplete: missing {term}")
 
     web = function(builders, None, "build_web_search_subgraph")
     web_source = ast.get_source_segment(builders_text, web) or ""
@@ -143,9 +137,9 @@ def main() -> None:
         if not path.is_file() or path.stat().st_size == 0:
             fail(f"Missing supplied GIST vectorstore file: {path}")
 
-    # Open WebUI: six selectable modes; auto default; PDF-only upload path.
+    # Open WebUI: exactly five selectable modes; auto default; no file upload path.
     compat = read("backend/app/openai_compat.py")
-    expected_model_ids = {'"auto"', '"direct"', '"gist-regulations"', '"web-search"', '"research-paper"', '"pdf-document"'}
+    expected_model_ids = {'"auto"', '"direct"', '"gist-regulations"', '"web-search"', '"research-paper"'}
     for model_id in expected_model_ids:
         if model_id not in compat:
             fail(f"Missing active Open WebUI model ID: {model_id}")
@@ -154,25 +148,15 @@ def main() -> None:
         model_block = compat.split("MODEL_TO_WORKFLOW", 1)[1].split("MODEL_DESCRIPTIONS", 1)[0]
         if old_id in model_block:
             fail(f"Inactive/old selectable model ID remains: {old_id}")
-    for term in ("_document_context", "_has_document_attachment", "pdf_document_context_chars"):
-        if term not in compat:
-            fail(f"Backend PDF context forwarding is incomplete: {term}")
-    if "File uploads are disabled" in compat:
-        fail("Old file-upload rejection remains in the OpenAI adapter")
+    if "File uploads are disabled" not in compat:
+        fail("Backend OpenAI adapter does not reject file-bearing requests")
 
     compose = read("docker-compose.yml")
     required_compose = (
         'WEBUI_NAME: ${WEBUI_NAME:-Infonet AI Router}',
-        '"auto","direct","web-search","gist-regulations","research-paper","pdf-document"',
+        '"auto","direct","web-search","gist-regulations","research-paper"',
         'DEFAULT_MODELS: "auto"',
-        'DEFAULT_PROMPT_SUGGESTIONS:',
-        'DEFAULT_MODEL_METADATA:',
-        'USER_PERMISSIONS_CHAT_FILE_UPLOAD: "true"',
-        'RAG_ALLOWED_FILE_EXTENSIONS: pdf',
-        'RAG_EMBEDDING_ENGINE: openai',
-        'RAG_EMBEDDING_MODEL: embedding',
-        'RAG_SYSTEM_CONTEXT: "true"',
-        'TASK_MODEL_EXTERNAL: "direct"',
+        'USER_PERMISSIONS_CHAT_FILE_UPLOAD: "false"',
         'USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"',
         'ENABLE_WEB_SEARCH: "false"',
         'USER_PERMISSIONS_FEATURES_WEB_SEARCH: "false"',
@@ -210,7 +194,7 @@ def main() -> None:
                 if path.is_file() and "__pycache__" not in path.parts and path.suffix not in {".pyc"}:
                     chunks.append(path.read_text(encoding="utf-8", errors="replace"))
     corpus = "\n".join(chunks)
-    forbidden = ("SaeGyeol Lab AI", "lab-auto", "lab-direct", "lab-rag", "domain_rag")
+    forbidden = ("SaeGyeol Lab AI", "lab-auto", "lab-direct", "lab-rag", "domain_rag", "WorkflowId.PDF")
     present = [term for term in forbidden if term in corpus]
     if present:
         fail(f"Old branding/workflow identifiers remain: {present}")
@@ -245,7 +229,6 @@ def main() -> None:
         "Web Search",
         "GIST Regulations",
         "Research Paper Drafting",
-        "Uploaded PDF",
     ):
         if label not in description_source:
             fail(f"Missing friendly Open WebUI route label: {label}")
@@ -270,9 +253,6 @@ def main() -> None:
     ):
         if term not in gist:
             fail(f"GIST citation/PDF-link implementation missing: {term}")
-
-    if pdf_document_source.count("_emit_step(") != 1:
-        fail("PDF workflow must emit exactly one concise progress step")
 
     if "_emit_step" not in web_source:
         fail("Web-search subgraph does not emit workflow steps")
@@ -329,20 +309,6 @@ def main() -> None:
         fail("GIST answer prompt does not delegate reference formatting to the backend")
     if "Source numbers reset on every turn" not in prompts:
         fail("Web-search prompt does not reset citation scope on each turn")
-
-    runtime_source = read("backend/app/runtime.py")
-    for term in (
-        "self.settings.pdf_document_context_chars",
-        "request.has_document_attachment",
-        "bool(request.document_context.strip())",
-    ):
-        if term not in runtime_source:
-            fail(f"PDF runtime state protection is incomplete: {term}")
-    if "user-uploaded PDF files" not in prompts:
-        fail("PDF answer prompt does not enforce uploaded-evidence grounding")
-    for label in ("Direct", "Web Search", "GIST Regulations", "Research Paper", "PDF Q&A"):
-        if f'"{label}"' not in compose:
-            fail(f"Missing landing-page suggestion for workflow: {label}")
 
     llm_source = read("backend/app/llm.py")
     if "hidden reasoning suppressed" in llm_source:

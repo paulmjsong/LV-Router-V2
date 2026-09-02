@@ -13,7 +13,6 @@ class WorkflowId(StrEnum):
     REGULATIONS = "gist-regulations"
     WEB_SEARCH = "web-search"
     PAPER = "research-paper"
-    PDF = "pdf-document"
     GRANT = "grant"
     WEBSITE = "website"
 
@@ -44,9 +43,6 @@ class ChatRequest(BaseModel):
     conversation_id: UUID | None = None
     workflow: WorkflowId = WorkflowId.AUTO
     quality: Quality = Quality.BALANCED
-    document_context: str = Field(default="", max_length=200000)
-    has_document_attachment: bool = False
-
 
     @field_validator("query")
     @classmethod

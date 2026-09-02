@@ -67,8 +67,8 @@ class LocalRouteDecision(BaseModel):
     def validate_contract(self) -> "LocalRouteDecision":
         if self.workflow in {WorkflowId.AUTO, WorkflowId.GRANT, WorkflowId.WEBSITE}:
             raise ValueError("The resolved route is not active")
-        if self.workflow in {WorkflowId.REGULATIONS, WorkflowId.PDF} and not self.use_documents:
-            raise ValueError(f"{self.workflow.value} requires document evidence")
+        if self.workflow == WorkflowId.REGULATIONS and not self.use_documents:
+            raise ValueError("gist-regulations requires retrieval")
         if self.workflow == WorkflowId.DIRECT and self.use_documents:
             raise ValueError("direct cannot use documents")
         if self.workflow != WorkflowId.DIRECT and self.model_tier == ModelTier.LOCAL_FAST:
@@ -287,7 +287,6 @@ class LocalSemanticRouter:
             model_tier=cls._DIFFICULTY_TO_TIER[difficulty],
             use_documents=classification.workflow.value in {
                 "pdf",
-                "pdf-document",
                 "regulations",
                 "gist-regulations",
             },
@@ -360,15 +359,6 @@ class LocalSemanticRouter:
                 used_fallback=True,
             )
 
-        if decision.workflow == WorkflowId.PDF and not has_pdf_attachment:
-            logger.warning("Router selected pdf-document without a PDF attachment; applying fallback")
-            return RouterOutcome(
-                decision=self._fallback(),
-                llm_result=result,
-                reason="Router selected pdf-document without an uploaded PDF; used visible fallback.",
-                used_fallback=True,
-            )
-
         if decision.workflow not in set(allowed_workflows):
             logger.warning(
                 "Router selected disallowed workflow=%s; applying %s fallback",
@@ -410,7 +400,7 @@ class StageModelPolicy:
         ModelTier.CLOUD_LARGE: 2,
     }
     _BY_ORDER = {value: key for key, value in _ORDER.items()}
-    _SPECIALIST = {WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER, WorkflowId.PDF}
+    _SPECIALIST = {WorkflowId.REGULATIONS, WorkflowId.WEB_SEARCH, WorkflowId.PAPER}
 
     @classmethod
     def explicit_tier(cls, quality: Quality) -> ModelTier:

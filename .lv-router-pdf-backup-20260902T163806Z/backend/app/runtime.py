@@ -47,12 +47,6 @@ WORKFLOW_SPECS: dict[WorkflowId, WorkflowSpec] = {
         "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
         _ALL_ROLES,
     ),
-    WorkflowId.PDF: WorkflowSpec(
-        WorkflowId.PDF,
-        "Uploaded PDF",
-        "Question answering grounded in PDFs uploaded to the current Open WebUI chat.",
-        _ALL_ROLES,
-    ),
     WorkflowId.PAPER: WorkflowSpec(
         WorkflowId.PAPER,
         "Research Paper Drafting",
@@ -176,11 +170,6 @@ class WorkflowRuntime:
             "requested_workflow": request.workflow.value,
             "allowed_workflows": [item.value for item in self._allowed_workflow_ids(user)],
             "quality": request.quality.value,
-            "document_context": request.document_context[
-                : self.settings.pdf_document_context_chars
-            ],
-            "has_document_attachment": request.has_document_attachment
-            or bool(request.document_context.strip()),
             "workflow_id": "",
             "recommended_tier": "",
             "use_documents": False,

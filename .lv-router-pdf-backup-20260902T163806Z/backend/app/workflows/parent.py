@@ -64,7 +64,7 @@ def build_parent_graph(
             return {
                 "workflow_id": requested.value,
                 "recommended_tier": services.policy.explicit_tier(quality).value,
-                "use_documents": requested in {WorkflowId.REGULATIONS, WorkflowId.PDF},
+                "use_documents": requested == WorkflowId.REGULATIONS,
                 "route_reason": "The user explicitly selected this workflow.",
                 "route_fallback": False,
                 "route_confidence": 1.0,
@@ -72,28 +72,12 @@ def build_parent_graph(
                 "router_served_model": "",
                 "call_events": [],
             }
-        if state.get("has_document_attachment"):
-            if WorkflowId.PDF not in allowed:
-                raise HTTPException(status_code=403, detail="The PDF document workflow is disabled")
-            return {
-                "workflow_id": WorkflowId.PDF.value,
-                "recommended_tier": services.policy.explicit_tier(quality).value,
-                "use_documents": True,
-                "route_reason": "A PDF attachment was detected; selected the isolated PDF document workflow.",
-                "route_fallback": False,
-                "route_confidence": 1.0,
-                "route_difficulty": "standard",
-                "router_served_model": "",
-                "call_events": [],
-            }
-
         outcome = await semantic_router.decide(
             query=state["query"],
             history=_history_rows(state),
             allowed_workflows=sorted(allowed, key=lambda item: item.value),
             user=_user(state),
             run_id=state["run_id"],
-            has_pdf_attachment=bool(state.get("has_document_attachment")),
         )
         decision = outcome.decision
         return {
@@ -125,7 +109,7 @@ def build_parent_graph(
         )
         return {
             "recommended_tier": resolved.value,
-            "use_documents": workflow in {WorkflowId.REGULATIONS, WorkflowId.PDF},
+            "use_documents": workflow == WorkflowId.REGULATIONS,
             "route_reason": str(state.get("route_reason", "")),
         }
 
@@ -164,7 +148,6 @@ def build_parent_graph(
     graph.add_node("validate_route", validate_route)
     graph.add_node("announce_route", announce_route)
     graph.add_node(WorkflowId.DIRECT.value, subgraphs.direct)
-    graph.add_node(WorkflowId.PDF.value, subgraphs.pdf_document)
     graph.add_node(WorkflowId.REGULATIONS.value, subgraphs.regulations)
     graph.add_node(WorkflowId.WEB_SEARCH.value, subgraphs.web_search)
     graph.add_node(WorkflowId.PAPER.value, subgraphs.paper)
@@ -177,7 +160,6 @@ def build_parent_graph(
         select_subgraph,
         {
             WorkflowId.DIRECT.value: WorkflowId.DIRECT.value,
-            WorkflowId.PDF.value: WorkflowId.PDF.value,
             WorkflowId.REGULATIONS.value: WorkflowId.REGULATIONS.value,
             WorkflowId.WEB_SEARCH.value: WorkflowId.WEB_SEARCH.value,
             WorkflowId.PAPER.value: WorkflowId.PAPER.value,
@@ -185,7 +167,6 @@ def build_parent_graph(
     )
     for workflow in (
         WorkflowId.DIRECT,
-        WorkflowId.PDF,
         WorkflowId.REGULATIONS,
         WorkflowId.WEB_SEARCH,
         WorkflowId.PAPER,

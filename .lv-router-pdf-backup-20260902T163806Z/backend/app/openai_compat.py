@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -28,7 +27,6 @@ MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
     "web-search": WorkflowId.WEB_SEARCH,
     "gist-regulations": WorkflowId.REGULATIONS,
     "research-paper": WorkflowId.PAPER,
-    "pdf-document": WorkflowId.PDF,
 }
 MODEL_DESCRIPTIONS: dict[str, str] = {
     "auto": "Automatic Routing",
@@ -36,74 +34,7 @@ MODEL_DESCRIPTIONS: dict[str, str] = {
     "web-search": "Web Search",
     "gist-regulations": "GIST Regulations",
     "research-paper": "Research Paper Drafting",
-    "pdf-document": "Uploaded PDF",
 }
-
-
-_CONTEXT_BLOCK_RE = re.compile(
-    r"<context\b[^>]*>(.*?)</context>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-_SOURCE_BLOCK_RE = re.compile(
-    r"<source\b[^>]*>.*?</source>",
-    flags=re.IGNORECASE | re.DOTALL,
-)
-
-
-def _truncate_source_block(block: str, max_chars: int) -> str:
-    if len(block) <= max_chars:
-        return block
-    open_end = block.find(">") + 1
-    suffix = "\n[TRUNCATED TO PDF CONTEXT LIMIT]\n</source>"
-    if open_end <= 0 or max_chars <= open_end + len(suffix):
-        return block[:max_chars]
-    return block[: max_chars - len(suffix)].rstrip() + suffix
-
-
-def _document_context(messages: list[dict[str, Any]], max_chars: int) -> str:
-    """Extract Open WebUI RAG source blocks only from wrapped system context.
-
-    User messages are deliberately ignored. A prompt containing a forged
-    ``<source>`` tag therefore cannot create an attachment route.
-    """
-    blocks: list[str] = []
-    seen: set[str] = set()
-    for message in messages:
-        if message.get("role") != "system":
-            continue
-        text = _message_text(message.get("content"))
-        for context_match in _CONTEXT_BLOCK_RE.finditer(text):
-            context_body = context_match.group(1)
-            for source_match in _SOURCE_BLOCK_RE.finditer(context_body):
-                block = source_match.group(0).strip()
-                if block and block not in seen:
-                    seen.add(block)
-                    blocks.append(block)
-
-    selected: list[str] = []
-    remaining = max_chars
-    for block in blocks:
-        separator = 2 if selected else 0
-        if remaining <= separator:
-            break
-        available = remaining - separator
-        chosen = _truncate_source_block(block, available)
-        if selected:
-            remaining -= separator
-        selected.append(chosen)
-        remaining -= len(chosen)
-        if len(chosen) < len(block):
-            break
-    return "\n\n".join(selected)
-
-
-def _has_document_attachment(payload: OpenAIChatRequest) -> bool:
-    metadata_files = payload.metadata.get("files")
-    return bool(
-        payload.files
-        or (isinstance(metadata_files, list) and metadata_files)
-        or payload.metadata.get("file_ids")
-    )
 
 
 class OpenAIChatRequest(BaseModel):
@@ -172,20 +103,14 @@ async def _execute_request(
     workflow = MODEL_TO_WORKFLOW.get(payload.model)
     if workflow is None:
         raise HTTPException(status_code=404, detail=f"Unknown workflow: {payload.model}")
-    runtime = _runtime(request)
-    document_context = _document_context(
-        payload.messages,
-        runtime.settings.pdf_document_context_chars,
-    )
-    has_document_attachment = bool(document_context) or _has_document_attachment(payload)
-    return await runtime.execute(
+    if payload.files or payload.metadata.get("files"):
+        raise HTTPException(status_code=400, detail="File uploads are disabled in this version")
+    return await _runtime(request).execute(
         ChatRequest(
             query=_latest_user_query(payload.messages),
             conversation_id=_conversation_id(request, user),
             workflow=workflow,
             quality=_quality(payload.metadata),
-            document_context=document_context,
-            has_document_attachment=has_document_attachment,
         ),
         user,
         token_sink=token_sink,

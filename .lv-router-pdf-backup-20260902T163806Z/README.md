@@ -10,12 +10,11 @@ A multi-user research-lab AI service built around **Open WebUI + FastAPI + one p
 | `direct` | One general-purpose inference path. |
 | `gist-regulations` | Straightforward RAG over the supplied GIST/Jireumgil FAISS vectorstore. |
 | `web-search` | Live DuckDuckGo search followed by a cited answer from search snippets. |
-| `research-paper`  | Basic multi-agent drafting workflow. |
-| `pdf-document`  | Evidence-grounded Q&A over PDFs uploaded in the current chat. |
+| `research-paper` | Basic multi-agent drafting workflow. |
 
 `grant` and `website` are intentionally **not selectable**. Open WebUI shows them as grey “coming soon” status in a non-dismissible banner until those workflows are designed.
 
-PDF uploads are enabled through Open WebUI. Other file extensions remain disabled, and uploaded evidence is handled only by the isolated `pdf-document` workflow.
+User file uploads are disabled in this version. The backend also rejects file-bearing requests.
 
 ## Architecture
 
@@ -30,7 +29,6 @@ Parent LangGraph
    route -> validate -> announce -> conditional subgraph -> finalize
                      |         |                    |
                      |         |                    +-- Research Paper multi-agent
-                         |         |                    +-- Uploaded PDF Q&A
                      |         +-- Web Search (DDGS)
                      |         +-- GIST Regulations RAG
                      +-- Direct
@@ -42,7 +40,7 @@ LiteLLM aliases
    +--> Ollama / vLLM / cloud providers
 ```
 
-The parent graph owns workflow selection and mounts five isolated compiled subgraphs. LiteLLM is still the only model/embedding gateway.
+The parent graph owns workflow selection and mounts four isolated compiled subgraphs. LiteLLM is still the only model/embedding gateway.
 
 ## Research Paper Drafting workflow
 
@@ -61,20 +59,6 @@ orchestrator
 - **Finalizer**: revises according to validation and returns the final user-facing draft.
 
 The agents are separate LangGraph nodes with separate model calls. They do not pretend to search literature or validate experiments unless that evidence is actually provided in conversation context.
-
-## Uploaded PDF workflow
-
-PDF ingestion remains in Open WebUI instead of being duplicated inside FastAPI:
-
-    upload PDF -> Open WebUI extraction/chunking/embedding/retrieval
-               -> <context><source> evidence in the provider request
-               -> backend context validation and attachment-gated routing
-               -> isolated pdf-document child graph
-               -> evidence-only answer with inline [source-id] citations
-
-In `auto`, an attachment signal selects `pdf-document` before the semantic router is called. Selecting `pdf-document` explicitly also works. Selecting any other workflow explicitly keeps that workflow isolated and does not expose uploaded PDF evidence to it.
-
-Open WebUI accepts only `.pdf` files here and uses LiteLLM's existing `embedding` alias. Its internal retrieval-query task is pinned to `direct`, so a background retrieval call cannot accidentally trigger Web Search or another specialist workflow.
 
 ## GIST Regulations workflow
 
@@ -138,9 +122,7 @@ Additional policy:
 - `gist-regulations`, `web-search`, and `research-paper` cannot resolve to `local-fast` in balanced Auto mode.
 - malformed or disallowed router output uses a **visible cloud-small fallback**, never silent local-fast.
 - the route line displayed before an answer includes workflow, difficulty, and fallback status.
-- an uploaded PDF deterministically selects `pdf-document` in `auto`, without a router-model call;
-- explicit modes bypass semantic routing and remain isolated from attached PDF evidence;
-- the semantic router runs for other `auto` requests.
+- the router still runs for every `auto` request; explicit modes bypass semantic routing.
 
 ## Configure
 
@@ -158,10 +140,6 @@ LOCAL_BACKEND=ollama
 OLLAMA_ROUTER_MODEL_ID=qwen3:0.6b
 OLLAMA_MODEL_ID=qwen3:4b-instruct-2507-q4_K_M
 ```
-
-## Initial suggested prompts
-
-The landing page includes one suggestion for Direct, Web Search, GIST Regulations, Research Paper Drafting, and Uploaded PDF Q&A. Attach a PDF before sending the PDF suggestion.
 
 ## Start
 
@@ -204,8 +182,8 @@ pytest
 
 ## Deliberate omissions in this version
 
-- no persistent shared user-document library or backend-owned upload API;
-- no non-PDF upload workflow;
+- no PDF/user-file workflow;
+- no document upload/indexing UI;
 - no generic pgvector RAG workflow;
 - no active Grant workflow;
 - no active Website workflow;
@@ -224,7 +202,7 @@ if the model omits one.
 
 ## Output-length policy
 
-User-facing Direct, Web Search, GIST Regulations, Research Paper, and Uploaded PDF generation
+User-facing Direct, Web Search, GIST Regulations, and Research Paper generation
 no longer has an application-level `max_tokens` ceiling. Small structured-control
 calls such as the paper orchestrator and validator remain bounded. Providers and
 models still enforce their own context/output limits.

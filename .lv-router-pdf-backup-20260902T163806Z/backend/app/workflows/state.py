@@ -19,8 +19,6 @@ class CommonWorkflowState(TypedDict, total=False):
     requested_workflow: str
     allowed_workflows: list[str]
     quality: str
-    document_context: str
-    has_document_attachment: bool
 
     workflow_id: str
     recommended_tier: str
@@ -41,10 +39,6 @@ class ParentState(CommonWorkflowState, total=False):
 
 
 class DirectState(CommonWorkflowState, total=False):
-    pass
-
-
-class PdfDocumentState(CommonWorkflowState, total=False):
     pass
 
 

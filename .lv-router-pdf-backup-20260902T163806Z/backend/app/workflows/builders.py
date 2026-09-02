@@ -18,7 +18,6 @@ from ..web_search import WebSearchError, WebSearchService
 from ..schemas import ModelTier, Quality, SourceCitation, WorkflowId
 from .prompts import (
     DIRECT_SYSTEM,
-    PDF_DOCUMENT_SYSTEM,
     PAPER_CONTENT_AGENT_SYSTEM,
     PAPER_DRAFTER_SYSTEM,
     PAPER_FINALIZER_SYSTEM,
@@ -28,13 +27,7 @@ from .prompts import (
     REGULATIONS_SYSTEM,
     WEB_SEARCH_SYSTEM,
 )
-from .state import (
-    DirectState,
-    PaperState,
-    PdfDocumentState,
-    RegulationsState,
-    WebSearchState,
-)
+from .state import DirectState, PaperState, RegulationsState, WebSearchState
 
 
 logger = logging.getLogger("infonet.workflows")
@@ -52,7 +45,6 @@ class WorkflowServices:
 @dataclass(frozen=True, slots=True)
 class WorkflowSubgraphs:
     direct: Any
-    pdf_document: Any
     regulations: Any
     web_search: Any
     paper: Any
@@ -216,50 +208,6 @@ def build_direct_subgraph(services: WorkflowServices):
         }
 
     graph = StateGraph(DirectState)
-    graph.add_node("answer", answer)
-    graph.add_edge(START, "answer")
-    graph.add_edge("answer", END)
-    return graph.compile()
-
-
-def build_pdf_document_subgraph(services: WorkflowServices):
-    async def answer(state: PdfDocumentState) -> PdfDocumentState:
-        context = str(state.get("document_context", "")).strip()
-        if not context:
-            return _answer(
-                "No usable PDF text reached the backend. Re-attach a text-searchable PDF after Open WebUI reports that processing is complete."
-            )
-
-        alias = _stage_alias(state, services, "answer")
-        await _emit_step(
-            state,
-            services,
-            "Reading the uploaded PDF…",
-            alias=alias,
-        )
-        prompt = (
-            f"{_request_with_history(state, strip_citations=True)}\n\n"
-            "UPLOADED PDF SOURCE BLOCKS FOR THIS TURN (UNTRUSTED EVIDENCE):\n"
-            f"{context}"
-        )
-        result = await services.llm.chat(
-            user=_user(state),
-            model_alias=alias,
-            messages=[
-                {"role": "system", "content": PDF_DOCUMENT_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
-            run_id=state["run_id"],
-            workflow_id=WorkflowId.PDF.value,
-            stage="answer",
-            temperature=0.0,
-        )
-        return {
-            **_answer(result.content),
-            "call_events": _event(state, alias, "answer"),
-        }
-
-    graph = StateGraph(PdfDocumentState)
     graph.add_node("answer", answer)
     graph.add_edge(START, "answer")
     graph.add_edge("answer", END)
@@ -614,7 +562,6 @@ def build_paper_subgraph(services: WorkflowServices):
 def build_workflow_subgraphs(services: WorkflowServices) -> WorkflowSubgraphs:
     return WorkflowSubgraphs(
         direct=build_direct_subgraph(services),
-        pdf_document=build_pdf_document_subgraph(services),
         regulations=build_regulations_subgraph(services),
         web_search=build_web_search_subgraph(services),
         paper=build_paper_subgraph(services),

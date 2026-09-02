@@ -8,5 +8,4 @@ def test_openwebui_exposes_only_active_modes() -> None:
         "web-search",
         "gist-regulations",
         "research-paper",
-        "pdf-document",
     ]
