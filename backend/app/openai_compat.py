@@ -26,17 +26,17 @@ MODEL_TO_WORKFLOW: dict[str, WorkflowId] = {
     "auto": WorkflowId.AUTO,
     "direct": WorkflowId.DIRECT,
     "web-search": WorkflowId.WEB_SEARCH,
+    "pdf-document": WorkflowId.PDF,
     "gist-regulations": WorkflowId.REGULATIONS,
     "research-paper": WorkflowId.PAPER,
-    "pdf-document": WorkflowId.PDF,
 }
 MODEL_DESCRIPTIONS: dict[str, str] = {
     "auto": "Automatic Routing",
     "direct": "Direct Response",
     "web-search": "Web Search",
+    "pdf-document": "Uploaded PDF",
     "gist-regulations": "GIST Regulations",
     "research-paper": "Research Paper Drafting",
-    "pdf-document": "Uploaded PDF",
 }
 
 
@@ -106,6 +106,34 @@ def _has_document_attachment(payload: OpenAIChatRequest) -> bool:
     )
 
 
+def _internal_task_name(payload: OpenAIChatRequest) -> str:
+    raw = payload.metadata.get("task")
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _workflow_for_request(payload: OpenAIChatRequest) -> WorkflowId:
+    # Open WebUI's title/query/tag helpers are provider calls, not user turns.
+    # They must never enter an attachment-routed specialist workflow.
+    if _internal_task_name(payload):
+        return WorkflowId.DIRECT
+    workflow = MODEL_TO_WORKFLOW.get(payload.model)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail=f"Unknown workflow: {payload.model}")
+    return workflow
+
+
+def _document_inputs(
+    payload: OpenAIChatRequest,
+    max_chars: int,
+) -> tuple[str, bool]:
+    # Internal tasks inherit request metadata, including attached-file metadata.
+    # Treating that inheritance as a real user attachment is the original bug.
+    if _internal_task_name(payload):
+        return "", False
+    context = _document_context(payload.messages, max_chars)
+    return context, bool(context) or _has_document_attachment(payload)
+
+
 class OpenAIChatRequest(BaseModel):
     model_config = ConfigDict(extra="ignore")
     model: str
@@ -169,19 +197,18 @@ async def _execute_request(
     user: UserContext,
     token_sink: Callable[[LLMStreamChunk], Awaitable[None]] | None = None,
 ) -> ChatResponse:
-    workflow = MODEL_TO_WORKFLOW.get(payload.model)
-    if workflow is None:
-        raise HTTPException(status_code=404, detail=f"Unknown workflow: {payload.model}")
+    task_name = _internal_task_name(payload)
+    workflow = _workflow_for_request(payload)
     runtime = _runtime(request)
-    document_context = _document_context(
-        payload.messages,
+    document_context, has_document_attachment = _document_inputs(
+        payload,
         runtime.settings.pdf_document_context_chars,
     )
-    has_document_attachment = bool(document_context) or _has_document_attachment(payload)
+    conversation_id = uuid4() if task_name else _conversation_id(request, user)
     return await runtime.execute(
         ChatRequest(
             query=_latest_user_query(payload.messages),
-            conversation_id=_conversation_id(request, user),
+            conversation_id=conversation_id,
             workflow=workflow,
             quality=_quality(payload.metadata),
             document_context=document_context,

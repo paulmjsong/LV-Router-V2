@@ -8,10 +8,10 @@ A multi-user research-lab AI service built around **Open WebUI + FastAPI + one p
 |---|---|
 | `auto` | Local router selects an active workflow and difficulty. **Default.** |
 | `direct` | One general-purpose inference path. |
-| `gist-regulations` | Straightforward RAG over the supplied GIST/Jireumgil FAISS vectorstore. |
 | `web-search` | Live DuckDuckGo search followed by a cited answer from search snippets. |
-| `research-paper`  | Basic multi-agent drafting workflow. |
 | `pdf-document`  | Evidence-grounded Q&A over PDFs uploaded in the current chat. |
+| `gist-regulations` | Straightforward RAG over the supplied GIST/Jireumgil FAISS vectorstore. |
+| `research-paper`  | Basic multi-agent drafting workflow. |
 
 `grant` and `website` are intentionally **not selectable**. Open WebUI shows them as grey “coming soon” status in a non-dismissible banner until those workflows are designed.
 
@@ -74,7 +74,7 @@ PDF ingestion remains in Open WebUI instead of being duplicated inside FastAPI:
 
 In `auto`, an attachment signal selects `pdf-document` before the semantic router is called. Selecting `pdf-document` explicitly also works. Selecting any other workflow explicitly keeps that workflow isolated and does not expose uploaded PDF evidence to it.
 
-Open WebUI accepts only `.pdf` files here and uses LiteLLM's existing `embedding` alias. Its internal retrieval-query task is pinned to `direct`, so a background retrieval call cannot accidentally trigger Web Search or another specialist workflow.
+Open WebUI accepts only `.pdf` files here and uses LiteLLM's existing `embedding` alias. Retrieval-query generation is disabled, and any remaining Open WebUI internal task is forced to Direct on an isolated conversation ID with file metadata removed. The PDF prompt also filters stale query-generation artifacts from earlier contaminated chat state.
 
 ## GIST Regulations workflow
 
@@ -161,7 +161,7 @@ OLLAMA_MODEL_ID=qwen3:4b-instruct-2507-q4_K_M
 
 ## Initial suggested prompts
 
-The landing page includes one suggestion for Direct, Web Search, GIST Regulations, Research Paper Drafting, and Uploaded PDF Q&A. Attach a PDF before sending the PDF suggestion.
+The landing page deterministically shows five actual questions in this order: Auto, Direct, Web Search, PDF Document, and GIST Regulations. Research Paper is intentionally omitted. Attach a PDF before clicking the PDF question.
 
 ## Start
 

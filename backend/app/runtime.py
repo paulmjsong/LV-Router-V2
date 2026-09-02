@@ -41,16 +41,16 @@ WORKFLOW_SPECS: dict[WorkflowId, WorkflowSpec] = {
         "Live DuckDuckGo search followed by a cited answer from retrieved snippets.",
         _ALL_ROLES,
     ),
-    WorkflowId.REGULATIONS: WorkflowSpec(
-        WorkflowId.REGULATIONS,
-        "GIST Regulations",
-        "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
-        _ALL_ROLES,
-    ),
     WorkflowId.PDF: WorkflowSpec(
         WorkflowId.PDF,
         "Uploaded PDF",
         "Question answering grounded in PDFs uploaded to the current Open WebUI chat.",
+        _ALL_ROLES,
+    ),
+    WorkflowId.REGULATIONS: WorkflowSpec(
+        WorkflowId.REGULATIONS,
+        "GIST Regulations",
+        "Straightforward RAG over the supplied Jireumgil FAISS vectorstore.",
         _ALL_ROLES,
     ),
     WorkflowId.PAPER: WorkflowSpec(

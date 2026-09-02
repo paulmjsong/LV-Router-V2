@@ -262,7 +262,12 @@ services:
       - "127.0.0.1:8000:8000"
 
   open-webui:
-    image: ${OPENWEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0}
+    build:
+      context: ./infra/open-webui
+      args:
+        OPENWEBUI_BASE_IMAGE: ${OPENWEBUI_IMAGE:-ghcr.io/open-webui/open-webui:v0.11.0}
+        OPENWEBUI_SOURCE_REF: ${OPENWEBUI_SOURCE_REF:-v0.11.0}
+    image: ${OPENWEBUI_CUSTOM_IMAGE:-lv-router-open-webui:v0.11.0-ordered-suggestions}
     restart: unless-stopped
     environment:
       WEBUI_NAME: ${WEBUI_NAME:-Infonet AI Router}
@@ -276,13 +281,13 @@ services:
       OPENAI_API_BASE_URL: http://backend:8000/v1
       OPENAI_API_KEY: ${OPENWEBUI_BACKEND_KEY:-sk-openwebui-change-me}
       OPENAI_API_CONFIGS: >-
-        {"0":{"enable":true,"connection_type":"local","model_ids":["auto","direct","web-search","gist-regulations","research-paper","pdf-document"]}}
+        {"0":{"enable":true,"connection_type":"local","model_ids":["auto","direct","web-search","pdf-document","gist-regulations","research-paper"]}}
       DEFAULT_MODELS: "auto"
       DEFAULT_PROMPT_SUGGESTIONS: >-
-        [{"title":["Direct","Explain a concept"],"content":"Explain the difference between supervised and unsupervised learning with one simple example each."},{"title":["Web Search","Check current information"],"content":"Search the web for the latest major AI model release and summarize what changed with sources."},{"title":["GIST Regulations","Check a rule"],"content":"What are the graduation requirements for my GIST degree program? Cite the applicable regulations."},{"title":["Research Paper","Draft a section"],"content":"Draft a concise related-work section from the research context I provide, marking every missing citation."},{"title":["PDF Q&A","Upload first"],"content":"Using the PDF I uploaded, identify its main claim, supporting evidence, and limitations. Cite the retrieved source identifiers."}]
+        [{"title":["Should I use retrieval-augmented generation or fine-tuning for an assistant over frequently updated documents?","Auto"],"content":"Should I use retrieval-augmented generation or fine-tuning for an assistant over frequently updated documents?"},{"title":["What is the difference between supervised and unsupervised learning?","Direct"],"content":"What is the difference between supervised and unsupervised learning?"},{"title":["What major AI model was released most recently, what changed, and which current sources support that?","Web Search"],"content":"What major AI model was released most recently, what changed, and which current sources support that?"},{"title":["What are the uploaded PDF's main claim, supporting evidence, and limitations?","PDF Document · upload first"],"content":"What are the uploaded PDF's main claim, supporting evidence, and limitations?"},{"title":["According to GIST regulations, what are the graduation requirements for a master's student?","GIST Regulations"],"content":"According to GIST regulations, what are the graduation requirements for a master's student?"}]
       DEFAULT_MODEL_METADATA: >-
         {"capabilities":{"file_upload":true,"file_context":true,"vision":false,"web_search":false,"image_generation":false,"code_interpreter":false,"citations":true,"status_updates":true,"builtin_tools":false}}
-      MODEL_ORDER_LIST: '["auto","direct","web-search","gist-regulations","research-paper","pdf-document"]'
+      MODEL_ORDER_LIST: '["auto","direct","web-search","pdf-document","gist-regulations","research-paper"]'
       TASK_MODEL: "direct"
       TASK_MODEL_EXTERNAL: "direct"
       USER_PERMISSIONS_CHAT_FILE_UPLOAD: "true"
@@ -296,13 +301,14 @@ services:
       RAG_EMBEDDING_BATCH_SIZE: "1"
       RAG_TOP_K: ${PDF_RAG_TOP_K:-6}
       RAG_SYSTEM_CONTEXT: "true"
+      ENABLE_RETRIEVAL_QUERY_GENERATION: "false"
       RAG_FULL_CONTEXT: "false"
       ENABLE_RAG_HYBRID_SEARCH: "false"
       USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"
       ENABLE_WEB_SEARCH: "false"
       USER_PERMISSIONS_FEATURES_WEB_SEARCH: "false"
       WEBUI_BANNERS: >-
-        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · Web Search · GIST Regulations · Research Paper Drafting · Uploaded PDF &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
+        [{"id":"infonet-coming-soon","type":"info","title":"Workflows","content":"<b>Available:</b> Auto · Direct · Web Search · Uploaded PDF · GIST Regulations · Research Paper Drafting &nbsp;&nbsp; <span style=\"opacity:0.45\">Grant — coming soon · Website — coming soon</span>","dismissible":false,"timestamp":1787389200}]
       ENABLE_NOTES: "false"
       ENABLE_CALENDAR: "false"
       ENABLE_AUTOMATIONS: "false"

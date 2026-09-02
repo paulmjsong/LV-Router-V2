@@ -163,7 +163,7 @@ def main() -> None:
     compose = read("docker-compose.yml")
     required_compose = (
         'WEBUI_NAME: ${WEBUI_NAME:-Infonet AI Router}',
-        '"auto","direct","web-search","gist-regulations","research-paper","pdf-document"',
+        '"auto","direct","web-search","pdf-document","gist-regulations","research-paper"',
         'DEFAULT_MODELS: "auto"',
         'DEFAULT_PROMPT_SUGGESTIONS:',
         'DEFAULT_MODEL_METADATA:',
@@ -172,6 +172,8 @@ def main() -> None:
         'RAG_EMBEDDING_ENGINE: openai',
         'RAG_EMBEDDING_MODEL: embedding',
         'RAG_SYSTEM_CONTEXT: "true"',
+        'ENABLE_RETRIEVAL_QUERY_GENERATION: "false"',
+        'context: ./infra/open-webui',
         'TASK_MODEL_EXTERNAL: "direct"',
         'USER_PERMISSIONS_CHAT_WEB_UPLOAD: "false"',
         'ENABLE_WEB_SEARCH: "false"',
@@ -340,9 +342,38 @@ def main() -> None:
             fail(f"PDF runtime state protection is incomplete: {term}")
     if "user-uploaded PDF files" not in prompts:
         fail("PDF answer prompt does not enforce uploaded-evidence grounding")
-    for label in ("Direct", "Web Search", "GIST Regulations", "Research Paper", "PDF Q&A"):
-        if f'"{label}"' not in compose:
-            fail(f"Missing landing-page suggestion for workflow: {label}")
+    suggestion_questions = (
+        "Should I use retrieval-augmented generation or fine-tuning for an assistant over frequently updated documents?",
+        "What is the difference between supervised and unsupervised learning?",
+        "What major AI model was released most recently, what changed, and which current sources support that?",
+        "What are the uploaded PDF's main claim, supporting evidence, and limitations?",
+        "According to GIST regulations, what are the graduation requirements for a master's student?",
+    )
+    suggestion_positions = []
+    for question in suggestion_questions:
+        if compose.count(question) != 2:
+            fail(f"Landing-page question must appear exactly as title and click content: {question}")
+        suggestion_positions.append(compose.index(question))
+    if suggestion_positions != sorted(suggestion_positions):
+        fail("Landing-page workflow questions are not in the required order")
+    for subtitle in ("Auto", "Direct", "Web Search", "PDF Document · upload first", "GIST Regulations"):
+        if f'"{subtitle}"' not in compose:
+            fail(f"Missing landing-page workflow subtitle: {subtitle}")
+    if '"title":["Research Paper"' in compose or '"title":["Research Paper Drafting"' in compose:
+        fail("Research-paper workflow must not have a landing-page suggestion")
+    for rel in ("infra/open-webui/Dockerfile", "infra/open-webui/patch-suggestions.mjs"):
+        if not (ROOT / rel).is_file():
+            fail(f"Missing deterministic Open WebUI suggestion build file: {rel}")
+    for term in (
+        "_internal_task_name",
+        "_workflow_for_request",
+        "_document_inputs",
+        "uuid4() if task_name",
+    ):
+        if term not in compat:
+            fail(f"Open WebUI internal-task isolation is incomplete: {term}")
+    if "_pdf_request_with_history" not in pdf_document_source:
+        fail("PDF workflow does not sanitize retrieval-query task artifacts")
 
     llm_source = read("backend/app/llm.py")
     if "hidden reasoning suppressed" in llm_source:

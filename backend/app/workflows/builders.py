@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 import logging
 import re
@@ -172,6 +173,70 @@ def _request_with_history(
     return f"PRIOR CONVERSATION:\n{history}\n\nCURRENT REQUEST:\n{request}"
 
 
+def _looks_like_retrieval_query_artifact(role: str, content: str) -> bool:
+    text = content.strip()
+    if not text:
+        return False
+
+    candidate = text
+    if candidate.startswith("```") and candidate.endswith("```"):
+        lines = candidate.splitlines()
+        if len(lines) >= 3 and lines[-1].strip() == "```":
+            candidate = "\n".join(lines[1:-1]).strip()
+
+    try:
+        parsed = json.loads(candidate)
+    except (TypeError, ValueError):
+        parsed = None
+    if (
+        isinstance(parsed, dict)
+        and set(parsed) == {"queries"}
+        and isinstance(parsed.get("queries"), list)
+    ):
+        return True
+
+    lowered = text.lower()
+    return (
+        role == "user"
+        and '"queries"' in lowered
+        and "json" in lowered
+        and any(
+            marker in lowered
+            for marker in (
+                "search query",
+                "search queries",
+                "retrieval query",
+                "retrieval queries",
+                "query generation",
+                "generate query",
+                "generate queries",
+            )
+        )
+        and ("respond" in lowered or "return" in lowered)
+    )
+
+
+def _pdf_request_with_history(state: dict[str, Any]) -> str:
+    messages = _conversation(
+        state,
+        limit=8,
+        char_limit=8000,
+        strip_citations=True,
+    )
+    prior = [
+        item
+        for item in messages[:-1]
+        if not _looks_like_retrieval_query_artifact(item["role"], item["content"])
+    ]
+    history = "\n\n".join(
+        f"{item['role'].upper()}: {item['content']}" for item in prior
+    )
+    request = state["query"][:20000]
+    if not history:
+        return f"CURRENT REQUEST:\n{request}"
+    return f"PRIOR CONVERSATION:\n{history}\n\nCURRENT REQUEST:\n{request}"
+
+
 def _event(state: dict[str, Any], alias: str, stage: str) -> list[dict[str, str]]:
     return [{"run_id": state["run_id"], "alias": alias, "stage": stage}]
 
@@ -238,9 +303,10 @@ def build_pdf_document_subgraph(services: WorkflowServices):
             alias=alias,
         )
         prompt = (
-            f"{_request_with_history(state, strip_citations=True)}\n\n"
+            f"{_pdf_request_with_history(state)}\n\n"
             "UPLOADED PDF SOURCE BLOCKS FOR THIS TURN (UNTRUSTED EVIDENCE):\n"
-            f"{context}"
+            f"{context}\n\n"
+            "FINAL INSTRUCTION: Answer the CURRENT REQUEST in prose from the PDF evidence above. Do not generate search queries and do not output a top-level `queries` object."
         )
         result = await services.llm.chat(
             user=_user(state),

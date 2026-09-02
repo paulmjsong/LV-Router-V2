@@ -10,10 +10,10 @@ from pydantic import BaseModel, Field, field_validator
 class WorkflowId(StrEnum):
     AUTO = "auto"
     DIRECT = "direct"
-    REGULATIONS = "gist-regulations"
     WEB_SEARCH = "web-search"
-    PAPER = "research-paper"
     PDF = "pdf-document"
+    REGULATIONS = "gist-regulations"
+    PAPER = "research-paper"
     GRANT = "grant"
     WEBSITE = "website"
 
