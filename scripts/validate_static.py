@@ -343,11 +343,10 @@ def main() -> None:
     if "user-uploaded PDF files" not in prompts:
         fail("PDF answer prompt does not enforce uploaded-evidence grounding")
     suggestion_questions = (
-        "Should I use retrieval-augmented generation or fine-tuning for an assistant over frequently updated documents?",
-        "What is the difference between supervised and unsupervised learning?",
-        "What major AI model was released most recently, what changed, and which current sources support that?",
-        "What are the uploaded PDF's main claim, supporting evidence, and limitations?",
-        "According to GIST regulations, what are the graduation requirements for a master's student?",
+        "지도학습과 비지도학습의 차이를 쉽게 설명해줘.",
+        "최근 공개된 주요 AI 모델은 무엇이고, 이전 모델과 비교해 무엇이 달라졌는지 최신 출처와 함께 알려줘.",
+        "업로드한 PDF의 핵심 주장과 근거, 그리고 한계를 정리해줘.",
+        "GIST 규정에 따르면 석사과정 학생의 졸업 요건은 무엇이야?",
     )
     suggestion_positions = []
     for question in suggestion_questions:
