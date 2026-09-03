@@ -58,7 +58,7 @@ class WebSearchService:
         r"(?:news|headlines?|updates?|developments?|current\s+events?)\b"
         r"|\b(?:news|headlines?|breaking\s+news)\s+(?:about|on|from|in|regarding)\b"
         r"|\bwhat(?:'s|\s+is)\s+happening\s+(?:in|with)\b"
-        r"|(?:최신|최근|오늘|현재)?\s*(?:뉴스|속보|헤드라인|소식|동향)"
+        r"|(?:최신|최근|오늘|현재)?\s*(?:뉴스|속보|헤드라인|소식)"
         r"(?:는|은|이|가|을|를|에|에서|도|만|로|으로)?"
         r")"
     )
@@ -258,7 +258,23 @@ class WebSearchService:
         client = DDGS(**kwargs)
 
         if intent == "news":
-            return self._search_news(client, query)
+            # Prefer the news endpoint for real news requests, but degrade to
+            # ordinary text search instead of failing the whole workflow.
+            try:
+                news_items = self._search_news(client, query)
+            except Exception as exc:
+                logger.info(
+                    "News search unavailable; falling back to text search: %s",
+                    exc,
+                )
+            else:
+                if news_items:
+                    return news_items
+                logger.info(
+                    "News search returned no usable results; falling back to text search"
+                )
+            return self._search_text(client, query, "web")
+
         return self._search_text(client, query, intent)
 
     def _search_news(self, client: Any, query: str) -> list[_SearchItem]:

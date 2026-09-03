@@ -344,7 +344,7 @@ def main() -> None:
         fail("PDF answer prompt does not enforce uploaded-evidence grounding")
     suggestion_questions = (
         "지도학습과 비지도학습의 차이를 쉽게 설명해줘.",
-        "최근 공개된 주요 AI 모델은 무엇이고, 이전 모델과 비교해 무엇이 달라졌는지 최신 출처와 함께 알려줘.",
+        "최근 공개된 주요 AI 모델을 웹에서 검색해서, 이전 모델과 비교해 무엇이 달라졌는지 최신 출처와 함께 알려줘.",
         "업로드한 PDF의 핵심 주장과 근거, 그리고 한계를 정리해줘.",
         "GIST 규정에 따르면 석사과정 학생의 졸업 요건은 무엇이야?",
     )

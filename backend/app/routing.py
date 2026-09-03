@@ -11,6 +11,7 @@ from .auth import UserContext
 from .config import Settings
 from .llm import LLMGateway, LLMResult
 from .schemas import ModelTier, Quality, WorkflowId
+import re
 
 logger = logging.getLogger("infonet.routing")
 
@@ -90,6 +91,24 @@ class LocalSemanticRouter:
     The model selects workflow and difficulty. It does not self-report confidence;
     generative confidence numbers are not calibrated and must not control fallback.
     """
+
+    # Explicit user search commands should not depend on a probabilistic router.
+    # Keep this narrow so nouns such as "binary search" do not force web search.
+    _EXPLICIT_WEB_SEARCH_RE = re.compile(
+        r"(?ix)(?:"
+        r"^\s*(?:search|browse|look\s+up)\b"
+        r"|\b(?:web|online|internet)\s+(?:search|lookup)\b"
+        r"|검색해\s*(?:줘|주세요|봐|보고)"
+        r"|검색해서|검색하여"
+        r"|찾아\s*(?:줘|주세요|봐)"
+        r"|(?:웹|인터넷|온라인).{0,24}(?:검색|찾아)"
+        r")"
+    )
+
+    @classmethod
+    def explicitly_requests_web_search(cls, query: str) -> bool:
+        # Return True only for an explicit request to perform a live search.
+        return bool(cls._EXPLICIT_WEB_SEARCH_RE.search(query or ""))
 
     _DIFFICULTY_TO_TIER = {
         RouteDifficulty.SIMPLE: ModelTier.LOCAL_FAST,

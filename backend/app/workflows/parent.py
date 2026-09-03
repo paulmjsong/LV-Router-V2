@@ -87,6 +87,24 @@ def build_parent_graph(
                 "call_events": [],
             }
 
+        # Deterministic override for explicit search commands. Explicit model
+        # selection and attached-document routing have already been handled above.
+        if (
+            WorkflowId.WEB_SEARCH in allowed
+            and semantic_router.explicitly_requests_web_search(state["query"])
+        ):
+            return {
+                "workflow_id": WorkflowId.WEB_SEARCH.value,
+                "recommended_tier": services.policy.explicit_tier(quality).value,
+                "use_documents": False,
+                "route_reason": "The request explicitly asks to search the web.",
+                "route_fallback": False,
+                "route_confidence": 1.0,
+                "route_difficulty": "standard",
+                "router_served_model": "",
+                "call_events": [],
+            }
+
         outcome = await semantic_router.decide(
             query=state["query"],
             history=_history_rows(state),
